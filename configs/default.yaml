@@ -1,0 +1,15 @@
+# Faust — Default Configuration
+# Edit values here or use: faust config set <key> <value>
+
+model: "llama3.3:8b"        # Model name as registered in Ollama
+backend: "ollama"            # "ollama" | "openai_compat"
+temperature: 0.7             # Float 0.0-2.0; lower = more deterministic
+context_window: 8192         # Max tokens maintained in context history
+system_prompt: |
+  You are Faust, a local AI assistant.
+  You are direct, precise, and technically capable.
+
+# OpenAI-compatible backend (only used if backend = openai_compat)
+openai_compat:
+  base_url: "http://localhost:1234/v1"
+  api_key: "local"

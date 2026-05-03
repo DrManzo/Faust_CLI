@@ -1,0 +1,76 @@
+"""Core data models and LangGraph state definition for Faust."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from typing import TypedDict
+
+from pydantic import BaseModel, Field
+
+
+class Role(str, Enum):
+    SYSTEM = "system"
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class Message(BaseModel):
+    """A single message in a conversation."""
+
+    role: Role
+    content: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        """Return the format expected by Ollama/OpenAI-compatible APIs."""
+        return {"role": self.role.value, "content": self.content}
+
+
+class Turn(BaseModel):
+    """One complete exchange: a user message and the assistant response."""
+
+    user_message: Message
+    assistant_message: Message | None = None
+
+
+class Session(BaseModel):
+    """A full conversation session."""
+
+    id: str
+    model: str
+    turns: list[Turn] = Field(default_factory=list)
+    system_prompt: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class OpenAICompatConfig(BaseModel):
+    """Settings for an OpenAI-compatible local API server."""
+
+    base_url: str = "http://localhost:1234/v1"
+    api_key: str = "local"
+
+
+class AppConfig(BaseModel):
+    """Runtime configuration loaded from configs/default.yaml."""
+
+    model: str = "llama3.3:8b"
+    backend: str = "ollama"
+    temperature: float = 0.7
+    context_window: int = 8192
+    system_prompt: str = "You are Faust, a local AI assistant."
+    openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)
+
+
+class FaustState(TypedDict):
+    """Shared state object passed between all LangGraph nodes.
+
+    Every node reads from FaustState and returns a partial dict of updates.
+    """
+
+    session: Session
+    config: AppConfig
+    user_input: str
+    messages: list[Message]
+    response: str
+    error: str | None

@@ -1,0 +1,1 @@
+"""adapters — LLM backend bridges."""

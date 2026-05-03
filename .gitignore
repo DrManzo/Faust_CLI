@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+.env/
+
+# Test and build artifacts
+.pytest_cache/
+.dist/
+build/
+
+# Faust data (local only)
+data/
+faust.db
+
+# IDE
+.vscode/
+.idea/

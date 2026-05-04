@@ -1,61 +1,51 @@
-"""LangGraph StateGraph definition for Faust."""
+"""LangGraph state graph for Faust."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from functools import partial
 
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
-from faust.adapters.base import LLMAdapter
-from faust.core.models import FaustState
-from faust.core.prompt import build_prompt
-from faust.exceptions import BackendError, GraphError
+from faust.core.models import FaustState, Message, Role
 
 
-def _get_db_path() -> str:
-    """Return the filesystem path for the SQLite checkpoint database.
+def build_prompt(state: FaustState) -> dict:
+    """Ensure system prompt is the first message in the conversation."""
+    current = list(state.get("messages", []))
+    has_system = any(m.role == Role.SYSTEM for m in current)
+    if not has_system and state.get("config"):
+        system_msg = Message(
+            role=Role.SYSTEM,
+            content=state["config"].system_prompt,
+        )
+        current = [system_msg] + current
+    return {"messages": current}
 
-    The database is stored in the project-local data/faust.db file.
-    """
 
-    root = Path(__file__).resolve().parents[3]
-    data_dir = root / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return str(data_dir / "faust.db")
-
-
-def build_graph(adapter: LLMAdapter):
-    """Compile and return the Faust base StateGraph with SQLite checkpointing."""
-
-    graph = StateGraph(FaustState)
-
-    def build_prompt_node(state: FaustState) -> dict:
-        """Assemble the ordered message list for the current turn."""
-
-        messages = build_prompt(state["session"], state["user_input"], state["config"])
-        return {"messages": messages}
-
-    async def llm_node(state: FaustState) -> dict:
-        """Stream a response from the backend and collect it into state."""
-
-        tokens: list[str] = []
-        try:
-            async for token in adapter.stream(state["messages"]):
-                tokens.append(token)
-        except BackendError as exc:
-            return {"error": str(exc), "response": ""}
-        return {"response": "".join(tokens), "error": None}
-
-    graph.add_node("build_prompt", build_prompt_node)
-    graph.add_node("llm", llm_node)
-    graph.set_entry_point("build_prompt")
-    graph.add_edge("build_prompt", "llm")
-    graph.add_edge("llm", END)
-
+def llm_node(state: FaustState, adapter) -> dict:
+    """Call the LLM adapter and collect the full streaming response."""
+    message_dicts = [m.to_dict() for m in state["messages"]]
+    full_response = ""
     try:
-        db_path = _get_db_path()
-        checkpointer = SqliteSaver.from_conn_string(db_path)
-        return graph.compile(checkpointer=checkpointer)
+        for chunk in adapter.generate(message_dicts, stream=True):
+            full_response += chunk
+        return {"response": full_response, "error": None}
     except Exception as exc:
-        raise GraphError(f"Graph compilation failed: {exc}") from exc
+        return {"response": "", "error": str(exc)}
+
+
+def build_graph(adapter) -> CompiledStateGraph:
+    """Build and compile the LangGraph state graph."""
+    workflow = StateGraph(FaustState)
+    workflow.add_node("build_prompt", build_prompt)
+    workflow.add_node("llm", partial(llm_node, adapter=adapter))
+    workflow.set_entry_point("build_prompt")
+    workflow.add_edge("build_prompt", "llm")
+    workflow.set_finish_point("llm")
+
+    # InMemorySaver keeps conversation context alive for the session
+    # SQLite persistence will be added in a later step
+    checkpointer = InMemorySaver()
+    return workflow.compile(checkpointer=checkpointer)

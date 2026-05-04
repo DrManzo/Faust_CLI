@@ -1,30 +1,40 @@
-"""`faust config` — view and edit runtime configuration."""
+"""faust config — show current configuration."""
 
 from __future__ import annotations
 
 import typer
-import yaml
+from rich.console import Console
+from rich.table import Table
 
-from faust.config import DEFAULT_CONFIG_PATH
-
-app = typer.Typer()
-
-
-@app.command("show")
-def show() -> None:
-    """Display the current configuration."""
-
-    typer.echo(DEFAULT_CONFIG_PATH.read_text())
+console = Console()
 
 
-@app.command("set")
-def set_value(
-    key: str = typer.Argument(..., help="Config key to set"),
-    value: str = typer.Argument(..., help="Value to assign"),
-) -> None:
-    """Set a top-level configuration key."""
+def config(ctx: typer.Context) -> None:
+    """Show the currently loaded Faust configuration."""
+    obj = ctx.obj or {}
+    cfg = obj.get("config")
 
-    raw: dict = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text()) or {}
-    raw[key] = value
-    DEFAULT_CONFIG_PATH.write_text(yaml.dump(raw, default_flow_style=False))
-    typer.echo(f"Set {key} = {value}")
+    if cfg is None:
+        typer.echo("Error: config not initialized.", err=True)
+        raise typer.Exit(1)
+
+    table = Table(
+        title="Faust Configuration",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Key", style="bold")
+    table.add_column("Value")
+
+    table.add_row("backend", cfg.backend)
+    table.add_row("model", cfg.model)
+    table.add_row("temperature", str(cfg.temperature))
+    table.add_row("context_window", str(cfg.context_window))
+    table.add_row("ollama.base_url", cfg.ollama.base_url)
+    table.add_row("ollama.request_timeout", str(cfg.ollama.request_timeout))
+    table.add_row(
+        "system_prompt",
+        cfg.system_prompt[:60] + "..." if len(cfg.system_prompt) > 60 else cfg.system_prompt,
+    )
+
+    console.print(table)

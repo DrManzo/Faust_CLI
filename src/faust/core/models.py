@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TypedDict, Literal
+from typing import TypedDict, Literal, List
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +39,7 @@ class Session(BaseModel):
 
     id: str
     model: str
-    turns: list[Turn] = Field(default_factory=list)
+    turns: List[Turn] = Field(default_factory=list)
     system_prompt: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -84,6 +84,6 @@ class FaustState(TypedDict):
     session: Session
     config: AppConfig
     user_input: str
-    messages: list[Message]
+    messages: List[Message]
     response: str
     error: str | None

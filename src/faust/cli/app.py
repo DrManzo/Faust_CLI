@@ -1,15 +1,16 @@
-"""Typer application root. Registers all Faust CLI commands."""
+"""Faust CLI entry point."""
+
+from __future__ import annotations
 
 import typer
 
-from faust.cli.commands import chat, config, run
+from faust.cli.commands.chat import chat as chat_cmd
+from faust.cli.commands.run import run as run_cmd
 
 app = typer.Typer(
-    name="faust",
-    help="Faust — local LLM CLI",
+    help="Faust — local AI assistant powered by Ollama.",
     no_args_is_help=True,
 )
 
-app.add_typer(chat.app, name="chat")
-app.add_typer(run.app, name="run")
-app.add_typer(config.app, name="config")
+app.command("chat")(chat_cmd)
+app.command("run")(run_cmd)

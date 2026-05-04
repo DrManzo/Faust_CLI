@@ -1,60 +1,86 @@
-"""`faust chat` — interactive multi-turn session."""
+"""faust chat — interactive conversation loop."""
 
 from __future__ import annotations
 
-import asyncio
-
 import typer
+from rich.console import Console
 
-from faust.cli.renderer import print_banner, print_error, print_session_info
-from faust.core.session import append_turn, create_session
+from faust.core.models import Message, Role
 
-app = typer.Typer()
-
-
-@app.callback(invoke_without_command=True)
-def chat(ctx: typer.Context) -> None:
-    """Start an interactive chat session with Faust."""
-
-    asyncio.run(_chat_loop(ctx.obj["config"], ctx.obj["graph"]))
+console = Console()
 
 
-async def _chat_loop(config, graph) -> None:
-    session = create_session(config)
-    print_banner()
-    print_session_info(session)
+def chat(
+    ctx: typer.Context,
+    thread_id: str = typer.Option(
+        "default", "--thread", "-t", help="Conversation thread ID."
+    ),
+) -> None:
+    """Start an interactive chat session with Faust using llama3:8b."""
+    obj = ctx.obj or {}
+    config = obj.get("config")
+    graph = obj.get("graph")
+
+    if not config or not graph:
+        typer.echo("Error: config or graph not initialized.", err=True)
+        raise typer.Exit(1)
+
+    state: dict = {
+        "session": None,
+        "config": config,
+        "user_input": "",
+        "messages": [],
+        "response": "",
+        "error": None,
+    }
+
+    console.print(
+        f"[bold green]Faust[/bold green] — chatting with "
+        f"[cyan]{config.model}[/cyan]"
+    )
+    console.print(
+        "Type [bold yellow]exit[/bold yellow] or "
+        "[bold yellow]quit[/bold yellow] to end.\n"
+    )
 
     while True:
         try:
-            user_input = input("
-[you] ").strip()
+            user_input = typer.prompt("")
         except (EOFError, KeyboardInterrupt):
-            typer.echo("
-Goodbye.")
+            console.print("\n[dim]Session ended.[/dim]")
             break
 
-        if not user_input:
-            continue
-        if user_input.lower() in {"/exit", "/quit", "exit", "quit"}:
-            typer.echo("Goodbye.")
+        stripped = user_input.strip()
+
+        if stripped.lower() in ("exit", "quit", "q"):
+            console.print("[dim]Goodbye.[/dim]")
             break
 
-        state = {
-            "session": session,
-            "config": config,
-            "user_input": user_input,
-            "messages": [],
-            "response": "",
-            "error": None,
-        }
-
-        result = await graph.ainvoke(state)
-
-        if result.get("error"):
-            print_error(result["error"])
+        if not stripped:
             continue
 
-        response = result["response"]
-        typer.echo(f"
-[faust] {response}")
-        session = append_turn(session, user_input, response)
+        state["messages"].append(Message(role=Role.USER, content=stripped))
+        state["user_input"] = stripped
+
+        try:
+            result = graph.invoke(
+                state,
+                config={"configurable": {"thread_id": thread_id}},
+            )
+            state.update(result)
+
+            response = state.get("response", "")
+            error = state.get("error")
+
+            if error:
+                console.print(f"[red]Error:[/red] {error}")
+            elif response:
+                console.print(f"\n[bold]Faust:[/bold] {response}\n")
+                state["messages"].append(
+                    Message(role=Role.ASSISTANT, content=response)
+                )
+            else:
+                console.print("[dim]No response received.[/dim]")
+
+        except Exception as exc:
+            console.print(f"[red]Unexpected error:[/red] {exc}")

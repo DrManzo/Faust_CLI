@@ -1,41 +1,42 @@
-"""Ollama local backend adapter."""
+"""Ollama adapter for Faust."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import json
+from typing import Any, Dict, Iterator, List
 
-import ollama as ollama_sdk
-
-from faust.adapters.base import LLMAdapter
-from faust.core.models import AppConfig, Message
-from faust.exceptions import BackendError
+import httpx
 
 
-class OllamaAdapter(LLMAdapter):
-    """LLM adapter for a locally running Ollama instance."""
+class OllamaAdapter:
+    """Streams responses from a local Ollama instance."""
 
-    def __init__(self, config: AppConfig) -> None:
-        super().__init__(config)
-        self._client = ollama_sdk.AsyncClient()
+    def __init__(self, config) -> None:
+        self.base_url = config.ollama.base_url.rstrip("/")
+        self.model = config.model
+        self.timeout = config.ollama.request_timeout
+        self.temperature = config.temperature
+        self.context_window = config.context_window
 
-    async def stream(self, messages: list[Message]) -> AsyncGenerator[str, None]:
-        payload = [m.to_dict() for m in messages]
-        try:
-            async for chunk in await self._client.chat(
-                model=self.config.model,
-                messages=payload,
-                stream=True,
-                options={"temperature": self.config.temperature},
-            ):
-                content = chunk.get("message", {}).get("content", "")
-                if content:
-                    yield content
-        except Exception as exc:  # pragma: no cover - network errors
-            raise BackendError(f"Ollama stream failed: {exc}") from exc
-
-    async def health_check(self) -> bool:
-        try:
-            await self._client.list()
-            return True
-        except Exception:
-            return False
+    def generate(
+        self, messages: List[Dict[str, Any]], stream: bool = True
+    ) -> Iterator[str]:
+        """Yield response tokens from Ollama /api/chat."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": stream,
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.context_window,
+            },
+        }
+        url = f"{self.base_url}/api/chat"
+        with httpx.Client(timeout=self.timeout) as client:
+            with client.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if line:
+                        data = json.loads(line)
+                        if "message" in data and "content" in data["message"]:
+                            yield data["message"]["content"]

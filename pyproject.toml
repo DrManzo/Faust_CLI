@@ -18,14 +18,17 @@ dependencies = [
 
 [project.scripts]
 faust = "faust.main:main"
+faust-tests = "faust.scripts.test_report:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/faust"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]

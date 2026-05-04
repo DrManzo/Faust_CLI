@@ -10,6 +10,7 @@ def test_message_to_dict():
 
 def test_app_config_defaults():
     config = AppConfig()
-    assert config.model == "llama3.3:8b"
+    # Default model from core.models.AppConfig
+    assert config.model == "llama3:8b"
     assert config.backend == "ollama"
     assert 0.0 <= config.temperature <= 2.0

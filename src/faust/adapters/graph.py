@@ -7,8 +7,9 @@ from functools import partial
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-from faust.core.models import FaustState, Message, Role
+from faust.core.models import FaustState, Message, Role, AppConfig
 
 
 def build_prompt(state: FaustState) -> dict:
@@ -45,7 +46,17 @@ def build_graph(adapter) -> CompiledStateGraph:
     workflow.add_edge("build_prompt", "llm")
     workflow.set_finish_point("llm")
 
-    # InMemorySaver keeps conversation context alive for the session
-    # SQLite persistence will be added in a later step
-    checkpointer = InMemorySaver()
+    # Allow-list Faust types so msgpack deserialization is treated as safe
+    allowed_msgpack_modules = (
+        ("faust.core.models", "AppConfig"),
+        ("faust.core.models", "Message"),
+        ("faust.core.models", "Role"),
+    )
+
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=allowed_msgpack_modules
+    )
+
+    checkpointer = InMemorySaver(serde=serde)  # short-term memory only
+
     return workflow.compile(checkpointer=checkpointer)

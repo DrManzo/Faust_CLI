@@ -10,6 +10,8 @@ from pydantic import ValidationError
 from faust.core.models import AppConfig
 from faust.exceptions import ConfigError
 
+
+# configs/default.yaml relative to project root (src/faust/config.py → ../../..)
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "configs" / "default.yaml"
 
 

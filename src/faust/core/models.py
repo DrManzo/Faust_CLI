@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TypedDict
+from typing import TypedDict, Literal
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +44,13 @@ class Session(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class OllamaSettings(BaseModel):
+    """Settings for the local Ollama backend."""
+
+    base_url: str = "http://localhost:11434"
+    request_timeout: int = 120
+
+
 class OpenAICompatConfig(BaseModel):
     """Settings for an OpenAI-compatible local API server."""
 
@@ -54,11 +61,17 @@ class OpenAICompatConfig(BaseModel):
 class AppConfig(BaseModel):
     """Runtime configuration loaded from configs/default.yaml."""
 
-    model: str = "llama3.3:8b"
-    backend: str = "ollama"
+    # Core model/backend settings
+    model: str = "llama3:8b"
+    backend: Literal["ollama", "openai_compat"] = "ollama"
     temperature: float = 0.7
     context_window: int = 8192
+
+    # High-level system prompt for the assistant
     system_prompt: str = "You are Faust, a local AI assistant."
+
+    # Backend-specific nested configs
+    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)
 
 

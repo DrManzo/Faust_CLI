@@ -1,39 +1,58 @@
-"""`faust run "<prompt>"` — single-shot inference."""
+"""faust run — single-shot prompt command."""
 
 from __future__ import annotations
 
-import asyncio
-
 import typer
+from rich.console import Console
 
-from faust.cli.renderer import print_error
-from faust.core.session import create_session
+from faust.core.models import Message, Role
 
-app = typer.Typer()
+console = Console()
 
 
-@app.callback(invoke_without_command=True)
 def run(
     ctx: typer.Context,
-    prompt: str = typer.Argument(..., help="The prompt to send"),
+    prompt: str = typer.Argument(..., help="Prompt to send to Faust."),
+    thread_id: str = typer.Option(
+        "default",
+        "--thread",
+        "-t",
+        help="Thread ID for checkpointing.",
+    ),
 ) -> None:
-    """Run a single prompt and print the response."""
+    """Send a single prompt and print the response."""
+    obj = ctx.obj or {}
+    config = obj.get("config")
+    graph = obj.get("graph")
 
-    asyncio.run(_run_once(ctx.obj["config"], ctx.obj["graph"], prompt))
+    if not config or not graph:
+        typer.echo("Error: config or graph not initialized.", err=True)
+        raise typer.Exit(1)
 
-
-async def _run_once(config, graph, user_input: str) -> None:
-    session = create_session(config)
-    state = {
-        "session": session,
+    state: dict = {
+        "session": None,
         "config": config,
-        "user_input": user_input,
-        "messages": [],
+        "user_input": prompt,
+        "messages": [Message(role=Role.USER, content=prompt)],
         "response": "",
         "error": None,
     }
-    result = await graph.ainvoke(state)
-    if result.get("error"):
-        print_error(result["error"])
-        raise typer.Exit(code=1)
-    typer.echo(result["response"])
+
+    try:
+        result = graph.invoke(
+            state,
+            config={"configurable": {"thread_id": thread_id}},
+        )
+        state.update(result)
+        response = state.get("response", "")
+        error = state.get("error")
+
+        if error:
+            console.print(f"[red]Error:[/red] {error}")
+            raise typer.Exit(1)
+        else:
+            console.print(response)
+
+    except Exception as exc:
+        console.print(f"[red]Unexpected error:[/red] {exc}")
+        raise typer.Exit(1)

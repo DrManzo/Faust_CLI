@@ -1,0 +1,75 @@
+time ollama run llama3:8b "Create a 7-day schedule for someone studying 24h/week: 15h law school prep, 7h Python practice, 3h workouts. Include realistic breaks and account for 20h work schedule." > llama3_3_results_general.txt
+
+real    1m44.268s
+user    0m0.150s
+sys     0m0.143s
+
+============================================================================================================================================
+
+
+
+Here is a sample 7-day schedule for someone studying 24 hours per week:
+
+**Monday**
+
+* 9:00 AM - 12:00 PM: Law school prep (3 hours)
+* 1:00 PM - 4:00 PM: Work (3 hours)
+* 5:00 PM - 6:00 PM: Dinner break
+* 7:00 PM - 10:00 PM: Python practice (3 hours)
+* 11:00 PM: Begin winding down for the night
+
+**Tuesday**
+
+* 9:00 AM - 12:00 PM: Law school prep (3 hours)
+* 1:00 PM - 2:30 PM: Workout (1.5 hours)
+* 3:00 PM - 6:00 PM: Work (3 hours)
+* 7:00 PM - 8:00 PM: Dinner break
+* 9:00 PM - 12:00 AM: Python practice (3 hours)
+
+**Wednesday**
+
+* 9:00 AM - 10:30 AM: Workout (1.5 hours)
+* 11:00 AM - 2:00 PM: Law school prep (3 hours)
+* 3:00 PM - 6:00 PM: Work (3 hours)
+* 7:00 PM - 8:00 PM: Dinner break
+* 9:00 PM - 12:00 AM: Python practice (3 hours)
+
+**Thursday**
+
+* 9:00 AM - 12:00 PM: Law school prep (3 hours)
+* 1:00 PM - 4:00 PM: Work (3 hours)
+* 5:00 PM - 6:00 PM: Dinner break
+* 7:00 PM - 8:30 PM: Python practice (1.5 hours)
+* 9:00 PM - 10:30 PM: Relaxation and self-care (1.5 hours)
+
+**Friday**
+
+* 9:00 AM - 12:00 PM: Law school prep (3 hours)
+* 1:00 PM - 2:30 PM: Workout (1.5 hours)
+* 3:00 PM - 6:00 PM: Work (3 hours)
+* 7:00 PM - 8:00 PM: Dinner break
+* 9:00 PM - 12:00 AM: Python practice (3 hours)
+
+**Saturday**
+
+* 10:00 AM - 1:00 PM: Law school prep (3 hours)
+* 2:00 PM - 4:00 PM: Work (2 hours)
+* 5:00 PM - 6:00 PM: Dinner break
+* 7:00 PM - 9:30 PM: Python practice (2.5 hours)
+
+**Sunday**
+
+* 10:00 AM - 1:00 PM: Law school prep (3 hours)
+* 2:00 PM - 4:00 PM: Work (2 hours)
+* 5:00 PM - 6:00 PM: Dinner break
+* 7:00 PM - 8:30 PM: Relaxation and self-care (1.5 hours)
+
+This schedule allows for:
+
+* 15 hours of law school prep per week
+* 7 hours of Python practice per week
+* 3 hours of workouts per week
+* 20 hours of work per week
+
+It also includes regular breaks throughout the day, as well as some relaxation and self-care time on Thursday and Sunday evenings. Of course, feel free to adjust the schedule to fit your individual needs and preferences!
+

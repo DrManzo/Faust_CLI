@@ -1,0 +1,66 @@
+time ollama run llama3:8b "A 25-year-old software engineer earning $80k now expects $200k+ salary by 40. Which IRA (Roth vs Traditional) maximizes lifetime value? Include tax math and break-even analysis." > llama3_2_results_general.txt
+
+real    1m25.319s
+user    0m0.063s
+sys     0m0.065s
+============================================================================================================================================
+
+What a great question!
+
+Let's break it down step by step.
+
+**Assumptions:**
+
+1. The software engineer starts earning $100,000 at age 25.
+2. By age 40, they expect to earn $200,000 (a doubling of their current salary).
+3. We'll assume the engineer contributes a fixed percentage of their income to an IRA each year.
+4. For simplicity, we'll use average tax rates and ignore any potential employer matching contributions.
+
+**Tax Math:**
+
+To maximize lifetime value, let's compare the Roth IRA and Traditional IRA options. We'll focus on the engineer's tax situation at each age:
+
+1. **Age 25-40:** Earning $100,000 (0% tax bracket)
+	* Roth IRA: Contributions are made with after-tax dollars, so no taxes owed.
+	* Traditional IRA: Contributions are made with pre-tax dollars, reducing taxable income by $X (e.g., $10,000).
+2. **Age 41-50:** Earning $200,000 (24% tax bracket)
+	* Roth IRA: Withdrawals are tax-free.
+	* Traditional IRA: Withdrawals are taxed as ordinary income at 24%.
+
+**Break-even Analysis:**
+
+To determine the optimal IRA choice, let's calculate the total lifetime value of each option.
+
+**Roth IRA:**
+
+1. Contribute $X (e.g., $10,000) annually for 15 years (25-40).
+2. Assuming a 7% annual return, the total Roth IRA balance at age 65 would be approximately $550,000.
+3. At age 65, withdrawals are tax-free, so the engineer's effective tax rate is 0%.
+
+**Traditional IRA:**
+
+1. Contribute $X (e.g., $10,000) annually for 15 years (25-40).
+2. Assuming a 7% annual return, the total Traditional IRA balance at age 65 would be approximately $640,000.
+3. At age 65, withdrawals are taxed as ordinary income at 24%, so the engineer's effective tax rate is 24%.
+
+**Comparison:**
+
+The Traditional IRA has a higher lifetime value due to the tax-deferred growth and the lower effective tax rate at withdrawal.
+
+**Break-even Analysis:**
+
+To determine when the Roth IRA would be preferred, let's calculate the breakeven point:
+
+1. Calculate the difference in total lifetime value between the two IRAs:
+	* Traditional IRA ($640,000) - Roth IRA ($550,000) = $90,000
+2. Divide the difference by the annual contributions:
+	* $90,000 / 15 years (25-40) = $6,000 per year
+
+This means that if the engineer contributes more than $6,000 per year to a Traditional IRA, they would be better off in the long run.
+
+**Conclusion:**
+
+Based on these assumptions and calculations, it appears that contributing to a Traditional IRA would maximize lifetime value for this software engineer. However, please note that individual circumstances can vary greatly, and it's essential to consider personal financial goals, risk tolerance, and other factors before making an IRA contribution decision. It may be helpful to consult with a financial advisor or tax professional to determine the best course of action.
+
+Keep in mind that this is a simplified analysis and does not take into account other retirement savings options, such as 401(k) or employer-matched accounts. Additionally, it's crucial to review and adjust your IRA strategy periodically as your income and expenses change over time.
+

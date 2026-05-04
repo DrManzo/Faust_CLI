@@ -1,0 +1,79 @@
+┌─[ogdrmanzo@parrot]─[~/Desktop/Final/faust/tests/test results]
+└──╼ $time ollama run qwen2.5-coder:14b "You are helping design a local CLI AI assistant called Faust. Sketch a high-level Python module layout (using a tree) for cli, core, adapters, and agents, and briefly explain the responsibility of each." \
+> qwen2.5-coder_q3_results_coder.txt
+
+real    2m57.578s
+user    0m0.097s
+sys     0m0.080s
+
+
+
+
+=============================================================================================================================================
+
+
+Certainly! Below is a high-level Python module layout for the CLI AI assistant named Faust:
+
+```
+faust/
+├── __init__.py
+├── cli/
+│   ├── __init__.py
+│   ├── main.py            # Entry point for the command line interface
+│   ├── commands/          # Directory to hold different CLI commands
+│   │   ├── __init__.py
+│   │   ├── setup.py       # Command for setting up Faust
+│   │   ├── update.py      # Command for updating Faust
+│   │   └── ...
+├── core/
+│   ├── __init__.py
+│   ├── engine.py          # Core processing engine of Faust
+│   ├── models/            # Directory to hold machine learning models
+│   │   ├── __init__.py
+│   │   ├── model1.py      # First AI model implementation
+│   │   └── ...
+│   └── utils.py           # Utility functions for core processing
+├── adapters/
+│   ├── __init__.py
+│   ├── nlp_adapter.py     # Adapter for natural language processing tasks
+│   ├── data_adapter.py    # Adapter for data handling and integration
+│   └── ...
+└── agents/
+    ├── __init__.py
+    ├── chat_agent.py      # AI agent responsible for chat interactions
+    ├── task_agent.py      # AI agent for managing tasks or workflows
+    └── ...
+```
+
+### Explanation of Each Component:
+
+- **`faust/`**: The root directory containing all the source code. It includes an `__init__.py` file to make it a Python package.
+
+  - **`cli/`**: This module contains everything related to the command-line interface (CLI) of Faust.
+  
+    - **`main.py`**: This is the entry point of the CLI application. It parses commands and routes them to the appropriate handlers.
+    
+    - **`commands/`**: This directory holds different command modules, each responsible for a specific task that can be performed via the CLI (e.g., setup, update).
+
+  - **`core/`**: This module contains the core functionalities of Faust. It's where the main processing happens.
+
+    - **`engine.py`**: The central component handling the workflow and interactions between different parts of Faust.
+    
+    - **`models/`**: A directory for AI models that are used in Faust, such as natural language processing or other machine learning models.
+    
+    - **`utils.py`**: Contains utility functions that support the core engine and help with various tasks like data manipulation, logging, etc.
+
+  - **`adapters/`**: This module contains adapters responsible for integrating external systems and handling specific types of data or tasks.
+
+    - **`nlp_adapter.py`**: An adapter specifically tailored for natural language processing tasks, allowing Faust to understand and generate human-like text.
+    
+    - **`data_adapter.py`**: A general adapter for integrating various data sources and managing data flow within Faust.
+
+  - **`agents/`**: This module contains intelligent agents that perform specific roles within the system.
+
+    - **`chat_agent.py`**: An AI agent designed to handle chat interactions, making Faust capable of conversational communication.
+    
+    - **`task_agent.py`**: An AI agent responsible for managing tasks or workflows, helping users with complex operations through automation.
+
+This structure provides a clear separation of concerns and makes it easier to manage, extend, and maintain the Faust CLI AI assistant.
+

@@ -1,0 +1,21 @@
+time ollama run llama3:8b "For a complete beginner, explain binary search using only everyday examples like findinga word in a dictionary. No technical jargon." > llama3_1_results_general.txt
+
+real    0m36.156s
+user    0m0.053s
+sys     0m0.026s
+
+=============================================================================================================================================
+
+
+
+Imagine you're trying to find a specific word in a big dictionary. You know the word starts with "T", but you don't know which page it's on. Here's how you might use binary search to find it:
+
+1. Start by looking at the middle page of the dictionary. This is like taking half of your search space and focusing on that part.
+2. On this middle page, you see a bunch of words starting with "M", then "N", and finally some starting with "T". You know the word you're looking for starts with "T", so it's in this section!
+3. Now you focus only on the "T" section. Again, look at the middle page (or half) of these "T" words.
+4. On this new middle page, you see some more words starting with "T". This time, you notice that your target word is probably somewhere between two specific words that start with "T".
+5. You narrow down your search even further by looking at the exact pages (or half-pages) between those two known words.
+6. Finally, you find your word! You know exactly which page it's on, and you can look it up quickly.
+
+That's binary search in a nutshell! By repeatedly dividing your search space in half and focusing on the most promising areas, you can find what you're looking for much faster than if you searched through every single page of the dictionary.
+

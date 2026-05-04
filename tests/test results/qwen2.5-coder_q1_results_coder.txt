@@ -1,0 +1,42 @@
+┌─[ogdrmanzo@parrot]─[~/Desktop/Final/faust/tests/test results]
+└──╼ $time ollama run qwen2.5-coder:14b "Write a small Python function that reads a JSON config file and returns a typed settings object. Include type hints and a short docstring." \
+> qwen2.5-coder_q1_results_coder.txt
+
+real    0m45.157s
+user    0m0.044s
+sys     0m0.035s
+
+
+============================================================================================================================================
+
+```python
+import json
+from dataclasses import dataclass
+
+@dataclass
+class ConfigSettings:
+    """Data class to hold configuration settings."""
+    debug_mode: bool
+    max_connections: int
+    api_key: str
+
+def load_config(file_path: str) -> ConfigSettings:
+    """
+    Load and return configuration settings from a JSON file.
+
+    Args:
+        file_path (str): The path to the JSON config file.
+
+    Returns:
+        ConfigSettings: An instance of ConfigSettings with the loaded configuration.
+    """
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    
+    return ConfigSettings(
+        debug_mode=data['debug_mode'],
+        max_connections=data['max_connections'],
+        api_key=data['api_key']
+    )
+```
+

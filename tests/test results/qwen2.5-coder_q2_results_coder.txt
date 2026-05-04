@@ -1,0 +1,83 @@
+┌─[ogdrmanzo@parrot]─[~/Desktop/Final/faust/tests/test results]
+└──╼ $time ollama run qwen2.5-coder:14b "Given a command-line Python app using Typer, show how to add a 'config show' command that prints the current config in a nicely formatted way." \
+> qwen2.5-coder_q2_results_coder.txt
+
+real    2m12.494s
+user    0m0.096s
+sys     0m0.069s
+
+
+
+
+=============================================================================================================================================
+
+
+
+
+
+To create a `config show` command in a command-line Python application using the Typer library, you can follow these steps:
+
+1. **Install Typer**: If you haven't already installed Typer, you can do so via pip:
+   ```bash
+   pip install typer
+   ```
+
+2. **Create the Application**: Define your main application and add a command to show the configuration.
+
+3. **Format the Output**: Use Python's built-in formatting capabilities to print the configuration in a nicely formatted way.
+
+Here's an example of how you might implement this:
+
+```python
+import typer
+from typing import Dict
+
+app = typer.Typer()
+
+# Example configuration dictionary
+config: Dict[str, str] = {
+    "api_key": "12345",
+    "base_url": "https://api.example.com",
+    "debug_mode": "true",
+}
+
+@app.command()
+def show():
+    """
+    Show the current configuration.
+    """
+    typer.echo("Current Configuration:")
+    for key, value in config.items():
+        typer.secho(f"{key}: {value}", fg=typer.colors.GREEN)
+
+if __name__ == "__main__":
+    app()
+```
+
+### Explanation:
+
+- **Import Typer**: Import the `typer` module to use its features.
+- **Define Configuration**: Define a dictionary called `config` that holds your application's configuration settings. In this example, it contains some dummy data.
+- **Create Command**: Use `@app.command()` to define a new command named `show`. This function will be executed when the user runs `your_app_name config show`.
+- **Format and Print**: Inside the `show` function, iterate over the `config` dictionary and print each key-value pair. Use `typer.secho` for colored output (optional but nice for readability).
+- **Run the Application**: The `if __name__ == "__main__":` block ensures that the Typer app runs only when the script is executed directly.
+
+### Running the Command:
+
+To run the command, save the script to a file, for example, `app.py`, and execute it from the command line:
+
+```bash
+python app.py config show
+```
+
+This will output something like:
+
+```
+Current Configuration:
+api_key: 12345
+base_url: https://api.example.com
+debug_mode: true
+```
+
+The output is colored, which makes it visually appealing and easy to read. You can customize the colors or formatting further based on your needs.
+

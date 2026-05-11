@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TypedDict, Literal, List
+from typing import List, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -59,41 +59,61 @@ class OpenAICompatConfig(BaseModel):
 
 
 class SqliteSettings(BaseModel):
-    """Settings for optional SQLite checkpoint persistence."""
+    """Settings for optional SQLite-backed persistence."""
 
     path: str = "data/faust.db"
+
+
+class MemorySettings(BaseModel):
+    """Settings for long-term durable memory."""
+
+    enabled: bool = True
+    backend: Literal["memory", "sqlite"] = "memory"
+    namespace: str = "memories"
+    max_results: int = 3
+
+
+class MemoryRecord(BaseModel):
+    """A durable user memory stored across sessions."""
+
+    key: str
+    slot: str | None = None
+    text: str
+    category: Literal["profile", "preference", "constraint", "fact"] = "fact"
+    source: Literal["explicit", "inferred"] = "explicit"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AppConfig(BaseModel):
     """Runtime configuration loaded from configs/default.yaml."""
 
-    # Core model/backend settings
     model: str = "llama3:8b"
     backend: Literal["ollama", "openai_compat"] = "ollama"
     temperature: float = 0.7
     context_window: int = 8192
 
-    # High-level system prompt for the assistant
     system_prompt: str = "You are Faust, a local AI assistant."
 
-    # Checkpointing / persistence
     checkpointer_backend: Literal["memory", "sqlite"] = "memory"
+    memory: MemorySettings = Field(default_factory=MemorySettings)
 
-    # Backend-specific nested configs
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)
     sqlite: SqliteSettings = Field(default_factory=SqliteSettings)
 
 
 class FaustState(TypedDict):
-    """Shared state object passed between all LangGraph nodes.
-
-    Every node reads from FaustState and returns a partial dict of updates.
-    """
+    """Shared state object passed between all LangGraph nodes."""
 
     session: Session
     config: AppConfig
+    user_id: str
     user_input: str
+    intent: str | None
+    active_agent: str | None
     messages: List[Message]
+    recalled_memories: List[MemoryRecord]
+    artifacts: List[str]
     response: str
     error: str | None

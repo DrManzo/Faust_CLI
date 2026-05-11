@@ -23,6 +23,19 @@ def test_default_config_yaml_loads_to_appconfig():
     # Temperature in a sane range
     assert 0.0 <= config.temperature <= 2.0
 
+    # Checkpointer config
+    assert config.checkpointer_backend in ("memory", "sqlite")
+    assert isinstance(config.sqlite.path, str)
+    assert config.sqlite.path.strip() != ""
+
+    # Long-term memory config
+    assert config.memory.enabled in (True, False)
+    assert config.memory.backend == "sqlite"
+    assert isinstance(config.memory.namespace, str)
+    assert config.memory.namespace.strip() != ""
+    assert isinstance(config.memory.max_results, int)
+    assert config.memory.max_results > 0
+
     # Nested Ollama config
     assert config.ollama.base_url.startswith("http://") or config.ollama.base_url.startswith("https://")
     assert config.ollama.request_timeout > 0

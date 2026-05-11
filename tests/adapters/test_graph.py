@@ -1,23 +1,29 @@
 """Tests for LangGraph wiring in faust.adapters.graph."""
 
-
 from __future__ import annotations
 
+from datetime import datetime, timezone
 
-from faust.adapters.graph import build_prompt, llm_node, build_graph
-from faust.core.models import AppConfig, Message, Role, Session
+from langgraph.store.memory import InMemoryStore
 
+from faust.adapters.graph import (
+    build_graph,
+    build_prompt,
+    llm_node,
+    memory_answer_node,
+    retrieve_memories,
+    save_memory,
+)
+from faust.core.models import AppConfig, MemoryRecord, Message, Role, Session
 
 
 class FakeAdapter:
     """Small fake adapter that yields deterministic chunks."""
 
-
     def __init__(self, chunks=None, should_fail: bool = False):
         self.chunks = chunks or ["Hello ", "world"]
         self.should_fail = should_fail
         self.last_messages = None
-
 
     def generate(self, messages, stream: bool = True):
         self.last_messages = messages
@@ -27,22 +33,29 @@ class FakeAdapter:
             yield chunk
 
 
-
-def make_state(messages=None):
+def make_state(
+    messages=None,
+    user_input: str = "Hello",
+    user_id: str = "test-user",
+    config: AppConfig | None = None,
+):
     """Minimal valid FaustState payload for graph tests."""
-    config = AppConfig()
+    config = config or AppConfig()
     session = Session(id="test-session", model=config.model)
-
 
     return {
         "session": session,
         "config": config,
-        "user_input": "Hello",
+        "user_id": user_id,
+        "user_input": user_input,
+        "intent": None,
+        "active_agent": None,
         "messages": messages or [],
+        "recalled_memories": [],
+        "artifacts": [],
         "response": "",
         "error": None,
     }
-
 
 
 def test_build_prompt_injects_system_message_when_missing():
@@ -53,37 +66,41 @@ def test_build_prompt_injects_system_message_when_missing():
         ]
     )
 
-
     result = build_prompt(state)
     messages = result["messages"]
 
-
     assert len(messages) == 2
     assert messages[0].role == Role.SYSTEM
-    assert messages[0].content == state["config"].system_prompt
+    assert state["config"].system_prompt in messages[0].content
     assert messages[1].role == Role.USER
     assert messages[1].content == "Hi"
 
 
-
-def test_build_prompt_does_not_duplicate_existing_system_message():
-    """build_prompt should leave messages unchanged if a system message already exists."""
+def test_build_prompt_includes_recalled_memories():
+    """build_prompt should inject recalled memories into the system prompt."""
+    now = datetime.now(timezone.utc)
     state = make_state(
         messages=[
-            Message(role=Role.SYSTEM, content="Existing system prompt"),
-            Message(role=Role.USER, content="Hi"),
+            Message(role=Role.USER, content="What do I like?"),
         ]
     )
-
+    state["recalled_memories"] = [
+        MemoryRecord(
+            key="mem-1",
+            text="User prefers concise answers.",
+            category="preference",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
 
     result = build_prompt(state)
-    messages = result["messages"]
+    system_message = result["messages"][0]
 
-
-    assert len(messages) == 2
-    assert messages[0].role == Role.SYSTEM
-    assert messages[0].content == "Existing system prompt"
-
+    assert system_message.role == Role.SYSTEM
+    assert "Relevant long-term memory about the user" in system_message.content
+    assert "User prefers concise answers." in system_message.content
 
 
 def test_llm_node_concatenates_streamed_chunks():
@@ -96,9 +113,7 @@ def test_llm_node_concatenates_streamed_chunks():
         ]
     )
 
-
     result = llm_node(state, adapter=adapter)
-
 
     assert result["response"] == "Faust"
     assert result["error"] is None
@@ -106,7 +121,6 @@ def test_llm_node_concatenates_streamed_chunks():
         {"role": "system", "content": "You are Faust."},
         {"role": "user", "content": "Say your name"},
     ]
-
 
 
 def test_llm_node_returns_error_on_adapter_failure():
@@ -118,13 +132,83 @@ def test_llm_node_returns_error_on_adapter_failure():
         ]
     )
 
-
     result = llm_node(state, adapter=adapter)
-
 
     assert result["response"] == ""
     assert "fake adapter failure" in result["error"]
 
+
+def test_save_memory_ignores_non_memory_requests():
+    """save_memory should not store normal prompts."""
+    store = InMemoryStore()
+    state = make_state(user_input="What is Python?")
+
+    result = save_memory(state, store=store)
+
+    assert result == {}
+
+
+def test_retrieve_memories_returns_empty_when_none_exist():
+    """retrieve_memories should return an empty list when nothing is stored."""
+    store = InMemoryStore()
+    state = make_state(user_input="Hello")
+
+    result = retrieve_memories(state, store=store)
+
+    assert result["recalled_memories"] == []
+
+
+def test_save_memory_returns_recalled_record():
+    """Explicit memory requests should append a recalled memory record."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="remember that my favorite editor is Neovim",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.text == "The user's favorite editor is Neovim."
+    assert memory.slot == "preference.favorite_editor"
+    assert memory.category == "preference"
+
+
+def test_retrieve_memories_returns_saved_memory_for_same_user():
+    """Saved memories should be retrievable for the same user namespace."""
+    store = InMemoryStore()
+    namespace = ("memories", "javier")
+    now = datetime.now(timezone.utc)
+
+    store.put(
+        namespace,
+        "mem-1",
+        {
+            "key": "mem-1",
+            "text": "The user's favorite editor is Neovim.",
+            "slot": "preference.favorite_editor",
+            "category": "preference",
+            "source": "explicit",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+    )
+
+    result = retrieve_memories(state, store=store)
+
+    assert len(result["recalled_memories"]) >= 1
+    assert any(
+        memory.text == "The user's favorite editor is Neovim."
+        and memory.slot == "preference.favorite_editor"
+        and memory.category == "preference"
+        for memory in result["recalled_memories"]
+    )
 
 
 def test_build_graph_runs_end_to_end():
@@ -136,21 +220,168 @@ def test_build_graph_runs_end_to_end():
         ]
     )
 
-
     graph = build_graph(adapter, state["config"])
-
 
     result = graph.invoke(
         state,
         config={
             "configurable": {
                 "thread_id": "test-thread",
+                "user_id": "test-user",
             }
         },
     )
-
 
     assert result["response"] == "Hello from graph"
     assert result["error"] is None
     assert result["messages"][0].role == Role.SYSTEM
     assert result["messages"][1].role == Role.USER
+
+
+def test_sqlite_memory_persists_across_graph_instances(tmp_path):
+    """SQLite-backed long-term memory should persist across graph rebuilds."""
+    db_path = tmp_path / "faust.db"
+    config = AppConfig()
+    config.memory.backend = "sqlite"
+    config.sqlite.path = str(db_path)
+
+    remember_adapter = FakeAdapter(chunks=["Stored."])
+    graph1 = build_graph(remember_adapter, config)
+
+    remember_state = make_state(
+        user_input="remember that my favorite editor is Neovim",
+        user_id="javier",
+        config=config,
+    )
+
+    graph1.invoke(
+        remember_state,
+        config={
+            "configurable": {
+                "thread_id": "thread-a",
+                "user_id": "javier",
+            }
+        },
+    )
+
+    recall_adapter = FakeAdapter(chunks=["Recall."])
+    graph2 = build_graph(recall_adapter, config)
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="What is my favorite editor?")],
+        user_input="What is my favorite editor?",
+        user_id="javier",
+        config=config,
+    )
+
+    result = graph2.invoke(
+        recall_state,
+        config={
+            "configurable": {
+                "thread_id": "thread-b",
+                "user_id": "javier",
+            }
+        },
+    )
+
+    recalled = result.get("recalled_memories", [])
+    assert any("favorite editor is Neovim" in memory.text for memory in recalled)
+
+
+def test_save_memory_overwrites_slot_based_memories():
+    """Saving a slot-backed memory should overwrite older records for that slot."""
+    store = InMemoryStore()
+    config = AppConfig()
+
+    # First memory
+    state1 = make_state(
+        user_input="remember that my favorite editor is Neovim",
+        user_id="javier",
+        config=config,
+    )
+    result1 = save_memory(state1, store=store)
+    assert len(result1["recalled_memories"]) == 1
+    first = result1["recalled_memories"][0]
+    assert first.text == "The user's favorite editor is Neovim."
+    assert first.slot == "preference.favorite_editor"
+
+    # Second memory for the same slot
+    state2 = make_state(
+        user_input="remember that my favorite editor is Emacs",
+        user_id="javier",
+        config=config,
+    )
+    result2 = save_memory(state2, store=store)
+    recalled = result2["recalled_memories"]
+
+    # Only one slot-backed preference should remain, with the new value
+    assert len([m for m in recalled if m.slot == "preference.favorite_editor"]) == 1
+    latest = [m for m in recalled if m.slot == "preference.favorite_editor"][0]
+    assert latest.text == "The user's favorite editor is Emacs."
+
+
+def test_memory_answer_node_sets_intent_and_active_agent():
+    """memory_answer_node should set intent and active_agent when answering."""
+    now = datetime.now(timezone.utc)
+    recalled = [
+        MemoryRecord(
+            key="preference.favorite_editor",
+            slot="preference.favorite_editor",
+            text="The user's favorite editor is Neovim.",
+            category="preference",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+    )
+    state["recalled_memories"] = recalled
+
+    result = memory_answer_node(state)
+
+    assert result["response"] == "Your favorite editor is Neovim."
+    assert result["error"] is None
+    assert result.get("intent") == "memory_recall"
+    assert result.get("active_agent") == "memory_answer"
+
+
+def test_llm_node_sets_active_agent():
+    """llm_node should set active_agent to 'assistant' when it runs."""
+    adapter = FakeAdapter(chunks=["Hi"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="Hello")],
+    )
+
+    result = llm_node(state, adapter=adapter)
+
+    assert result["response"] == "Hi"
+    assert result["error"] is None
+    assert result.get("active_agent") == "assistant"
+
+
+def test_graph_preserves_artifacts_list():
+    """Graph execution should not drop existing artifacts."""
+    adapter = FakeAdapter(chunks=["Hello ", "from graph"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="Test graph")],
+    )
+    state["artifacts"] = ["initial-note"]
+
+    graph = build_graph(adapter, state["config"])
+
+    result = graph.invoke(
+        state,
+        config={
+            "configurable": {
+                "thread_id": "test-thread",
+                "user_id": "test-user",
+            }
+        },
+    )
+
+    # The graph doesn't write artifacts yet, but it should not delete them
+    assert "artifacts" in result
+    assert "initial-note" in result["artifacts"]

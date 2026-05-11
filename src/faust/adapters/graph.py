@@ -146,9 +146,27 @@ def _detect_slot(memory_text: str) -> tuple[str | None, str]:
 
 def _query_keywords(query: str) -> set[str]:
     stopwords = {
-        "what", "is", "my", "what's", "do", "i", "you", "remember",
-        "did", "say", "about", "the", "a", "an", "are", "to", "of",
-        "when", "was", "who", "am",
+        "what",
+        "is",
+        "my",
+        "what's",
+        "do",
+        "i",
+        "you",
+        "remember",
+        "did",
+        "say",
+        "about",
+        "the",
+        "a",
+        "an",
+        "are",
+        "to",
+        "of",
+        "when",
+        "was",
+        "who",
+        "am",
     }
     words = re.findall(r"[a-z0-9]+", _normalize_text(query))
     return {word for word in words if word not in stopwords}
@@ -309,50 +327,89 @@ def build_prompt(state: FaustState) -> dict:
 
 def _is_memory_write(query: str) -> bool:
     normalized_query = _normalize_text(query)
-    return normalized_query.startswith((
-        "remember that ",
-        "remember this ",
-        "remember ",
-    ))
+    return normalized_query.startswith(
+        (
+            "remember that ",
+            "remember this ",
+            "remember ",
+        )
+    )
+
+
+def _detect_recall_slot(query: str) -> str | None:
+    """Classify simple recall questions into a known memory slot."""
+    q = _normalize_text(query)
+    if not q:
+        return None
+
+    if any(
+        phrase in q
+        for phrase in (
+            "favorite editor",
+            "preferred editor",
+            "what editor do i prefer",
+            "which editor do i prefer",
+            "what editor do i use",
+        )
+    ):
+        return "preference.favorite_editor"
+
+    if any(
+        phrase in q
+        for phrase in (
+            "who am i",
+            "what is my name",
+            "what's my name",
+            "do you know my name",
+        )
+    ):
+        return "profile.name"
+
+    if any(
+        phrase in q
+        for phrase in (
+            "when was i born",
+            "what is my birthdate",
+            "what's my birthdate",
+            "when is my birthday",
+            "what is my birthday",
+            "what's my birthday",
+        )
+    ):
+        return "profile.birthdate"
+
+    return None
+
+
+def _has_recalled_slot(recalled: list[MemoryRecord], slot: str) -> bool:
+    return any(memory.slot == slot for memory in recalled)
 
 
 def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | None:
     """Return a deterministic answer for simple user-fact recall."""
-    normalized_query = _normalize_text(query)
-    if not normalized_query or not recalled:
+    slot = _detect_recall_slot(query)
+    if not slot or not recalled:
         return None
 
     best_by_slot = {
-        memory.slot: memory
-        for memory in recalled
-        if memory.slot
+        memory.slot: memory for memory in recalled if memory.slot
     }
+    memory = best_by_slot.get(slot)
+    if memory is None:
+        return None
 
-    favorite_editor_memory = best_by_slot.get("preference.favorite_editor")
-    if favorite_editor_memory and "favorite editor" in normalized_query:
-        text = favorite_editor_memory.text.strip()
-        prefix = "The user's favorite editor is "
-        value = text.removeprefix(prefix).rstrip(".")
+    text = memory.text.strip()
+
+    if slot == "preference.favorite_editor":
+        value = text.removeprefix("The user's favorite editor is ").rstrip(".")
         return f"Your favorite editor is {value}."
 
-    name_memory = best_by_slot.get("profile.name")
-    if name_memory and (
-        "my name" in normalized_query or "who am i" in normalized_query
-    ):
-        text = name_memory.text.strip()
-        prefix = "The user's name is "
-        value = text.removeprefix(prefix).rstrip(".")
+    if slot == "profile.name":
+        value = text.removeprefix("The user's name is ").rstrip(".")
         return f"Your name is {value}."
 
-    birthdate_memory = best_by_slot.get("profile.birthdate")
-    if birthdate_memory and (
-        "when was i born" in normalized_query
-        or "what is my birthdate" in normalized_query
-        or "what's my birthdate" in normalized_query
-    ):
-        text = birthdate_memory.text.strip()
-        prefix = "The user's birthdate is "
-        value = text.removeprefix(prefix).rstrip(".")
+    if slot == "profile.birthdate":
+        value = text.removeprefix("The user's birthdate is ").rstrip(".")
         return f"You were born on {value}."
 
     return None
@@ -375,17 +432,29 @@ def memory_answer_node(state: FaustState) -> dict:
     return {}
 
 
-def should_use_memory_answer(state: FaustState) -> str:
-    """Route memory writes and deterministic recall queries before the LLM."""
+def route_memory(state: FaustState) -> dict:
+    """Decide whether this turn is a memory write, memory recall, or normal LLM."""
     query = state.get("user_input", "")
     recalled = state.get("recalled_memories", [])
 
     if _is_memory_write(query):
+        return {"memory_route": "memory_write"}
+
+    slot = _detect_recall_slot(query)
+    if slot and _has_recalled_slot(recalled, slot):
+        return {"memory_route": "memory_recall"}
+
+    return {"memory_route": "llm"}
+
+
+def should_use_memory_answer(state: FaustState) -> str:
+    """Route memory writes and deterministic recall queries before the LLM."""
+    route = state.get("memory_route")
+
+    if route == "memory_write":
         return "save_memory"
-
-    if _extract_recall_answer(query, recalled) is not None:
+    if route == "memory_recall":
         return "memory_answer"
-
     return "build_prompt"
 
 
@@ -432,7 +501,7 @@ def save_memory(state: FaustState, *, store) -> dict:
     if not matched_prefix:
         return {}
 
-    memory_text = user_input[len(matched_prefix):].strip()
+    memory_text = user_input[len(matched_prefix) :].strip()
     if not memory_text:
         return {}
 
@@ -475,19 +544,23 @@ def save_memory(state: FaustState, *, store) -> dict:
         return {}
 
     recalled = [
-        m for m in state.get("recalled_memories", [])
+        m
+        for m in state.get("recalled_memories", [])
         if not (slot is not None and m.slot == slot)
     ]
     recalled.append(record)
     recalled = _dedupe_memories(recalled)
 
-    response = ""
     if slot == "preference.favorite_editor":
-        response = f"Okay — I'll remember that your favorite editor is {extracted_value}."
+        response = (
+            f"Okay — I'll remember that your favorite editor is {extracted_value}."
+        )
     elif slot == "profile.name":
         response = f"Okay — I'll remember that your name is {extracted_value}."
     elif slot == "profile.birthdate":
-        response = f"Okay — I'll remember that you were born on {extracted_value}."
+        response = (
+            f"Okay — I'll remember that you were born on {extracted_value}."
+        )
     else:
         response = "Okay — I'll remember that."
 
@@ -531,14 +604,16 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
         "retrieve_memories",
         partial(retrieve_memories, store=store),
     )
+    workflow.add_node("route_memory", route_memory)
     workflow.add_node("memory_answer", memory_answer_node)
     workflow.add_node("build_prompt", build_prompt)
     workflow.add_node("llm", partial(llm_node, adapter=adapter))
     workflow.add_node("save_memory", partial(save_memory, store=store))
 
     workflow.set_entry_point("retrieve_memories")
+    workflow.add_edge("retrieve_memories", "route_memory")
     workflow.add_conditional_edges(
-        "retrieve_memories",
+        "route_memory",
         should_use_memory_answer,
         {
             "save_memory": "save_memory",

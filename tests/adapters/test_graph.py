@@ -7,11 +7,14 @@ from datetime import datetime, timezone
 from langgraph.store.memory import InMemoryStore
 
 from faust.adapters.graph import (
+    _detect_recall_slot,
+    _has_recalled_slot,
     build_graph,
     build_prompt,
     llm_node,
     memory_answer_node,
     retrieve_memories,
+    route_memory,
     save_memory,
 )
 from faust.core.models import AppConfig, MemoryRecord, Message, Role, Session
@@ -49,6 +52,7 @@ def make_state(
         "user_id": user_id,
         "user_input": user_input,
         "intent": None,
+        "memory_route": None,
         "active_agent": None,
         "messages": messages or [],
         "recalled_memories": [],
@@ -286,6 +290,11 @@ def test_sqlite_memory_persists_across_graph_instances(tmp_path):
 
     recalled = result.get("recalled_memories", [])
     assert any("favorite editor is Neovim" in memory.text for memory in recalled)
+    
+    # Step 6: Verify deterministic memory answer instead of LLM fallback
+    assert result["response"] == "Your favorite editor is Neovim."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"
 
 
 def test_save_memory_overwrites_slot_based_memories():
@@ -385,3 +394,159 @@ def test_graph_preserves_artifacts_list():
     # The graph doesn't write artifacts yet, but it should not delete them
     assert "artifacts" in result
     assert "initial-note" in result["artifacts"]
+
+
+# ========== Step 6: Memory Router Tests ==========
+
+
+def test_detect_recall_slot_favorite_editor_variants():
+    """_detect_recall_slot should recognize favorite editor phrasings."""
+    assert _detect_recall_slot("What is my favorite editor?") == "preference.favorite_editor"
+    assert _detect_recall_slot("which editor do i prefer") == "preference.favorite_editor"
+    assert _detect_recall_slot("what editor do i use") == "preference.favorite_editor"
+    assert _detect_recall_slot("what's my preferred editor") == "preference.favorite_editor"
+
+
+def test_detect_recall_slot_name_variants():
+    """_detect_recall_slot should recognize name recall phrasings."""
+    assert _detect_recall_slot("Who am I?") == "profile.name"
+    assert _detect_recall_slot("What is my name?") == "profile.name"
+    assert _detect_recall_slot("Do you know my name?") == "profile.name"
+    assert _detect_recall_slot("what's my name") == "profile.name"
+
+
+def test_detect_recall_slot_birthdate_variants():
+    """_detect_recall_slot should recognize birthdate recall phrasings."""
+    assert _detect_recall_slot("When was I born?") == "profile.birthdate"
+    assert _detect_recall_slot("What is my birthdate?") == "profile.birthdate"
+    assert _detect_recall_slot("When is my birthday?") == "profile.birthdate"
+    assert _detect_recall_slot("what's my birthday") == "profile.birthdate"
+
+
+def test_detect_recall_slot_returns_none_for_non_recall():
+    """_detect_recall_slot should return None for non-recall queries."""
+    assert _detect_recall_slot("Hello!") is None
+    assert _detect_recall_slot("How are you?") is None
+    assert _detect_recall_slot("Tell me a joke") is None
+
+
+def test_has_recalled_slot_returns_true_when_slot_exists():
+    """_has_recalled_slot should detect an available recalled slot."""
+    now = datetime.now(timezone.utc)
+    recalled = [
+        MemoryRecord(
+            key="preference.favorite_editor",
+            slot="preference.favorite_editor",
+            text="The user's favorite editor is Neovim.",
+            category="preference",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+
+    assert _has_recalled_slot(recalled, "preference.favorite_editor") is True
+
+
+def test_has_recalled_slot_returns_false_when_slot_missing():
+    """_has_recalled_slot should return False when slot doesn't exist."""
+    now = datetime.now(timezone.utc)
+    recalled = [
+        MemoryRecord(
+            key="profile.name",
+            slot="profile.name",
+            text="The user's name is Javier.",
+            category="profile",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+
+    assert _has_recalled_slot(recalled, "preference.favorite_editor") is False
+
+
+def test_route_memory_returns_memory_write_for_remember_input():
+    """route_memory should classify explicit remember requests as memory writes."""
+    state = make_state(user_input="remember that my favorite editor is Neovim")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_write"
+
+
+def test_route_memory_returns_memory_recall_when_slot_exists():
+    """route_memory should choose deterministic recall when slot memory exists."""
+    now = datetime.now(timezone.utc)
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+    )
+    state["recalled_memories"] = [
+        MemoryRecord(
+            key="preference.favorite_editor",
+            slot="preference.favorite_editor",
+            text="The user's favorite editor is Neovim.",
+            category="preference",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_recall"
+
+
+def test_route_memory_returns_llm_when_slot_missing():
+    """route_memory should fall back to llm when the slot is not present."""
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+    )
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "llm"
+
+
+def test_route_memory_returns_llm_for_normal_query():
+    """route_memory should route normal queries to llm."""
+    state = make_state(user_input="How are you today?")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "llm"
+
+
+def test_graph_returns_deterministic_memory_answer_without_llm_fallback():
+    """Graph should answer direct recall from memory instead of using LLM output."""
+    adapter = FakeAdapter(chunks=["This should not be used"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    remember_state = make_state(
+        user_input="remember that my favorite editor is Neovim",
+        user_id="javier",
+        config=config,
+    )
+    graph.invoke(
+        remember_state,
+        config={"configurable": {"thread_id": "thread-1", "user_id": "javier"}},
+    )
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="What is my favorite editor?")],
+        user_input="What is my favorite editor?",
+        user_id="javier",
+        config=config,
+    )
+    result = graph.invoke(
+        recall_state,
+        config={"configurable": {"thread_id": "thread-2", "user_id": "javier"}},
+    )
+
+    assert result["response"] == "Your favorite editor is Neovim."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"

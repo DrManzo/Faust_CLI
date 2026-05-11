@@ -111,6 +111,7 @@ class FaustState(TypedDict):
     user_id: str
     user_input: str
     intent: str | None
+    memory_route: str | None
     active_agent: str | None
     messages: List[Message]
     recalled_memories: List[MemoryRecord]

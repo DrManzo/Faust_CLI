@@ -19,3 +19,27 @@ faust.db
 # IDE
 .vscode/
 .idea/
+
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environment
+venv/
+
+# Faust runtime data
+data/faust_memory.db
+data/sessions/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Local SQLite files
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS
+.DS_Store
+Thumbs.db

@@ -79,6 +79,13 @@ def _memory_record_from_item(item) -> MemoryRecord | None:
         return None
 
 
+def _strip_correction_prefixes(text: str) -> str:
+    """Remove lightweight correction words from an extracted value."""
+    value = text.strip().rstrip(".")
+    value = re.sub(r"^(actually|no[, ]+|nope[, ]+|it's|it is)\s+", "", value, flags=re.IGNORECASE)
+    return value.strip()
+
+
 def _normalize_memory_text(memory_text: str) -> tuple[str, str]:
     """Normalize first-person user facts into stable third-person memory text."""
     text = memory_text.strip().rstrip(".")
@@ -96,12 +103,20 @@ def _normalize_memory_text(memory_text: str) -> tuple[str, str]:
         name = text[11:].strip()
         return (f"The user's name is {name}.", "profile")
 
+    if lowered.startswith("i am "):
+        name = text[5:].strip()
+        return (f"The user's name is {name}.", "profile")
+
     if lowered.startswith("i was born on "):
         birthdate = text[14:].strip()
         return (f"The user's birthdate is {birthdate}.", "profile")
 
     if lowered.startswith("my birthdate is "):
         birthdate = text[16:].strip()
+        return (f"The user's birthdate is {birthdate}.", "profile")
+
+    if lowered.startswith("my birthday is "):
+        birthdate = text[15:].strip()
         return (f"The user's birthdate is {birthdate}.", "profile")
 
     return (f"The user said: {text}.", "fact")
@@ -115,31 +130,50 @@ def _detect_slot(memory_text: str) -> tuple[str | None, str]:
         r"my favorite editor is\s+(.+)", original, flags=re.IGNORECASE
     )
     if favorite_editor and normalized.startswith("my favorite editor is "):
-        return "preference.favorite_editor", favorite_editor.group(1).strip()
+        value = _strip_correction_prefixes(favorite_editor.group(1))
+        return "preference.favorite_editor", value
 
     preferred_editor = re.match(
         r"i prefer\s+(.+)", original, flags=re.IGNORECASE
     )
     if preferred_editor and "editor" in normalized:
-        return "preference.favorite_editor", preferred_editor.group(1).strip()
+        value = _strip_correction_prefixes(preferred_editor.group(1))
+        return "preference.favorite_editor", value
 
     user_name = re.match(
         r"my name is\s+(.+)", original, flags=re.IGNORECASE
     )
     if user_name and normalized.startswith("my name is "):
-        return "profile.name", user_name.group(1).strip()
+        value = _strip_correction_prefixes(user_name.group(1))
+        return "profile.name", value
+
+    i_am_name = re.match(
+        r"i am\s+(.+)", original, flags=re.IGNORECASE
+    )
+    if i_am_name and normalized.startswith("i am "):
+        value = _strip_correction_prefixes(i_am_name.group(1))
+        return "profile.name", value
 
     born_on = re.match(
         r"i was born on\s+(.+)", original, flags=re.IGNORECASE
     )
     if born_on and normalized.startswith("i was born on "):
-        return "profile.birthdate", born_on.group(1).strip()
+        value = _strip_correction_prefixes(born_on.group(1))
+        return "profile.birthdate", value
 
     birthdate_is = re.match(
         r"my birthdate is\s+(.+)", original, flags=re.IGNORECASE
     )
     if birthdate_is and normalized.startswith("my birthdate is "):
-        return "profile.birthdate", birthdate_is.group(1).strip()
+        value = _strip_correction_prefixes(birthdate_is.group(1))
+        return "profile.birthdate", value
+
+    birthday_is = re.match(
+        r"my birthday is\s+(.+)", original, flags=re.IGNORECASE
+    )
+    if birthday_is and normalized.startswith("my birthday is "):
+        value = _strip_correction_prefixes(birthday_is.group(1))
+        return "profile.birthdate", value
 
     return None, original
 
@@ -195,6 +229,9 @@ def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
         "when was i born" in normalized_query
         or "what is my birthdate" in normalized_query
         or "what's my birthdate" in normalized_query
+        or "when is my birthday" in normalized_query
+        or "what is my birthday" in normalized_query
+        or "what's my birthday" in normalized_query
     ):
         score += 220
 
@@ -202,6 +239,9 @@ def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
         score += 80
 
     if "birthdate" in normalized_query and "birthdate" in normalized_text:
+        score += 80
+
+    if "birthday" in normalized_query and "birthdate" in normalized_text:
         score += 80
 
     if "born" in normalized_query and "birthdate" in normalized_text:
@@ -325,15 +365,35 @@ def build_prompt(state: FaustState) -> dict:
     return {"messages": current}
 
 
-def _is_memory_write(query: str) -> bool:
+def _extract_memory_candidate(query: str) -> tuple[str | None, str | None]:
+    """Recognize explicit or implicit durable self-fact writes."""
     normalized_query = _normalize_text(query)
-    return normalized_query.startswith(
-        (
-            "remember that ",
-            "remember this ",
-            "remember ",
-        )
+    if not normalized_query:
+        return None, None
+
+    explicit_prefixes = (
+        "remember that ",
+        "remember this ",
+        "remember ",
     )
+    for prefix in explicit_prefixes:
+        if normalized_query.startswith(prefix):
+            raw = query[len(prefix):].strip()
+            slot, value = _detect_slot(raw)
+            if slot:
+                return slot, value
+            return None, raw
+
+    slot, value = _detect_slot(query)
+    if slot:
+        return slot, value
+
+    return None, None
+
+
+def _is_memory_write(query: str) -> bool:
+    slot, value = _extract_memory_candidate(query)
+    return bool(slot and value)
 
 
 def _detect_recall_slot(query: str) -> str | None:
@@ -410,7 +470,7 @@ def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | No
 
     if slot == "profile.birthdate":
         value = text.removeprefix("The user's birthdate is ").rstrip(".")
-        return f"You were born on {value}."
+        return f"Your birthdate is {value}."
 
     return None
 
@@ -480,36 +540,19 @@ def llm_node(state: FaustState, adapter) -> dict:
 
 
 def save_memory(state: FaustState, *, store) -> dict:
-    """Persist explicit durable memory requests."""
+    """Persist explicit or implicit durable memory requests."""
     config = state["config"]
     user_input = state.get("user_input", "").strip()
 
     if not config.memory.enabled or store is None or not user_input:
         return {}
 
-    lowered = user_input.lower()
-    triggers = (
-        "remember that ",
-        "remember this ",
-        "remember ",
-    )
-
-    matched_prefix = next(
-        (prefix for prefix in triggers if lowered.startswith(prefix)),
-        None,
-    )
-    if not matched_prefix:
+    slot, extracted_value = _extract_memory_candidate(user_input)
+    if slot is None or not extracted_value:
         return {}
-
-    memory_text = user_input[len(matched_prefix) :].strip()
-    if not memory_text:
-        return {}
-
-    normalized_text, normalized_category = _normalize_memory_text(memory_text)
 
     namespace = _memory_namespace(state)
     now = datetime.now(timezone.utc)
-    slot, extracted_value = _detect_slot(memory_text)
 
     if slot == "preference.favorite_editor":
         stored_text = f"The user's favorite editor is {extracted_value}."
@@ -524,6 +567,7 @@ def save_memory(state: FaustState, *, store) -> dict:
         key = slot
         category = "profile"
     else:
+        normalized_text, normalized_category = _normalize_memory_text(user_input)
         stored_text = normalized_text
         key = str(uuid4())
         category = normalized_category
@@ -552,15 +596,11 @@ def save_memory(state: FaustState, *, store) -> dict:
     recalled = _dedupe_memories(recalled)
 
     if slot == "preference.favorite_editor":
-        response = (
-            f"Okay — I'll remember that your favorite editor is {extracted_value}."
-        )
+        response = f"Okay — I'll remember that your favorite editor is {extracted_value}."
     elif slot == "profile.name":
         response = f"Okay — I'll remember that your name is {extracted_value}."
     elif slot == "profile.birthdate":
-        response = (
-            f"Okay — I'll remember that you were born on {extracted_value}."
-        )
+        response = f"Okay — I'll remember that your birthdate is {extracted_value}."
     else:
         response = "Okay — I'll remember that."
 

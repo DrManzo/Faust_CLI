@@ -550,3 +550,187 @@ def test_graph_returns_deterministic_memory_answer_without_llm_fallback():
     assert result["response"] == "Your favorite editor is Neovim."
     assert result["intent"] == "memory_recall"
     assert result["active_agent"] == "memory_answer"
+
+def test_save_memory_accepts_implicit_name_statement():
+    """save_memory should persist a natural self-fact name statement."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="I am Javier",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.slot == "profile.name"
+    assert memory.text == "The user's name is Javier."
+    assert result["response"] == "Okay — I'll remember that your name is Javier."
+
+
+def test_save_memory_accepts_implicit_birthday_statement():
+    """save_memory should persist a natural birthday statement."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="my birthday is April 4th 1994",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.slot == "profile.birthdate"
+    assert memory.text == "The user's birthdate is April 4th 1994."
+    assert result["response"] == "Okay — I'll remember that your birthdate is April 4th 1994."
+
+
+def test_save_memory_accepts_implicit_favorite_editor_statement():
+    """save_memory should persist a natural favorite editor statement."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="my favorite editor is Vim",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.slot == "preference.favorite_editor"
+    assert memory.text == "The user's favorite editor is Vim."
+    assert result["response"] == "Okay — I'll remember that your favorite editor is Vim."
+
+
+def test_save_memory_strips_actually_from_editor_correction():
+    """save_memory should normalize 'actually' in favorite editor corrections."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="my favorite editor is actually Vim",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.slot == "preference.favorite_editor"
+    assert memory.text == "The user's favorite editor is Vim."
+    assert result["response"] == "Okay — I'll remember that your favorite editor is Vim."
+
+
+def test_route_memory_returns_memory_write_for_implicit_name_statement():
+    """route_memory should classify 'I am ...' as a memory write."""
+    state = make_state(user_input="I am Javier")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_write"
+
+
+def test_route_memory_returns_memory_write_for_implicit_birthday_statement():
+    """route_memory should classify birthday self-facts as memory writes."""
+    state = make_state(user_input="my birthday is April 4th 1994")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_write"
+
+
+def test_route_memory_returns_memory_write_for_editor_correction():
+    """route_memory should classify direct editor corrections as memory writes."""
+    state = make_state(user_input="my favorite editor is actually Vim")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_write"
+
+
+def test_save_memory_overwrites_slot_for_implicit_editor_correction():
+    """Implicit editor correction should overwrite the existing slot value."""
+    store = InMemoryStore()
+    config = AppConfig()
+
+    first_state = make_state(
+        user_input="remember that my favorite editor is Neovim",
+        user_id="javier",
+        config=config,
+    )
+    save_memory(first_state, store=store)
+
+    second_state = make_state(
+        user_input="my favorite editor is actually Vim",
+        user_id="javier",
+        config=config,
+    )
+    result = save_memory(second_state, store=store)
+
+    recalled = result["recalled_memories"]
+    editor_memories = [m for m in recalled if m.slot == "preference.favorite_editor"]
+
+    assert len(editor_memories) == 1
+    assert editor_memories[0].text == "The user's favorite editor is Vim."
+
+
+def test_graph_returns_deterministic_name_answer_from_implicit_write():
+    """Graph should recall a name saved from a natural self-fact statement."""
+    adapter = FakeAdapter(chunks=["This should not be used"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    remember_state = make_state(
+        user_input="I am Javier",
+        user_id="javier",
+        config=config,
+    )
+    graph.invoke(
+        remember_state,
+        config={"configurable": {"thread_id": "thread-name-1", "user_id": "javier"}},
+    )
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="Who am I?")],
+        user_input="Who am I?",
+        user_id="javier",
+        config=config,
+    )
+    result = graph.invoke(
+        recall_state,
+        config={"configurable": {"thread_id": "thread-name-2", "user_id": "javier"}},
+    )
+
+    assert result["response"] == "Your name is Javier."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"
+
+
+def test_graph_returns_deterministic_birthdate_answer_from_implicit_write():
+    """Graph should recall a birthdate saved from a natural self-fact statement."""
+    adapter = FakeAdapter(chunks=["This should not be used"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    remember_state = make_state(
+        user_input="my birthday is April 4th 1994",
+        user_id="javier",
+        config=config,
+    )
+    graph.invoke(
+        remember_state,
+        config={"configurable": {"thread_id": "thread-bday-1", "user_id": "javier"}},
+    )
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="When is my birthday?")],
+        user_input="When is my birthday?",
+        user_id="javier",
+        config=config,
+    )
+    result = graph.invoke(
+        recall_state,
+        config={"configurable": {"thread_id": "thread-bday-2", "user_id": "javier"}},
+    )
+
+    assert result["response"] == "Your birthdate is April 4th 1994."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"

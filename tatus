@@ -1,0 +1,43 @@
+[1mdiff --git a/tests/adapters/test_graph.py b/tests/adapters/test_graph.py[m
+[1mindex 2cdb6e9..1182976 100644[m
+[1m--- a/tests/adapters/test_graph.py[m
+[1m+++ b/tests/adapters/test_graph.py[m
+[36m@@ -551,7 +551,7 @@[m [mdef test_graph_returns_deterministic_memory_answer_without_llm_fallback():[m
+     assert result["intent"] == "memory_recall"[m
+     assert result["active_agent"] == "memory_answer"[m
+ [m
+[31m-def test_save_memory_accepts_implicit_name_statement():[m
+[32m+[m[32m    def test_save_memory_accepts_implicit_name_statement():[m
+     """save_memory should persist a natural self-fact name statement."""[m
+     store = InMemoryStore()[m
+     state = make_state([m
+[36m@@ -568,11 +568,11 @@[m [mdef test_save_memory_accepts_implicit_name_statement():[m
+     assert result["response"] == "Okay — I'll remember that your name is Javier."[m
+ [m
+ [m
+[31m-def test_save_memory_accepts_implicit_birthday_statement():[m
+[31m-    """save_memory should persist a natural birthday statement."""[m
+[32m+[m[32mdef test_save_memory_accepts_implicit_name_statement():[m
+[32m+[m[32m    """save_memory should persist a natural self-fact name statement."""[m
+     store = InMemoryStore()[m
+     state = make_state([m
+[31m-        user_input="my birthday is April 4th 1994",[m
+[32m+[m[32m        user_input="I am Javier",[m
+         user_id="javier",[m
+     )[m
+ [m
+[36m@@ -580,10 +580,10 @@[m [mdef test_save_memory_accepts_implicit_birthday_statement():[m
+ [m
+     assert len(result["recalled_memories"]) == 1[m
+     memory = result["recalled_memories"][0][m
+[31m-    assert memory.slot == "profile.birthdate"[m
+[31m-    assert memory.text == "The user's birthdate is April 4th 1994."[m
+[31m-    assert result["response"] == "Okay — I'll remember that your birthdate is April 4th 1994."[m
+[31m-[m
+[32m+[m[32m    assert memory.slot == "profile.name"[m
+[32m+[m[32m    assert memory.text == "The user's name is Javier."[m
+[32m+[m[32m    assert result["response"] == "Okay — I'll remember that your name is Javier."[m
+[32m+[m[41m    [m
+ [m
+ def test_save_memory_accepts_implicit_favorite_editor_statement():[m
+     """save_memory should persist a natural favorite editor statement."""[m

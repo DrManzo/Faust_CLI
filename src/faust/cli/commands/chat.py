@@ -18,6 +18,33 @@ def _resolve_option(value, fallback: str) -> str:
     return str(value)
 
 
+def _print_debug_state(state: dict) -> None:
+    """Render bounded internal execution state for debugging."""
+    active_agent = state.get("active_agent")
+    requested_role = state.get("requested_role")
+    task_type = state.get("task_type")
+    requested_tests = state.get("requested_tests") or []
+    execution_notes = state.get("execution_notes")
+    error = state.get("error")
+
+    console.print("[dim]--- debug ---[/dim]")
+    if active_agent:
+        console.print(f"[dim]active_agent:[/dim] {active_agent}")
+    if requested_role:
+        console.print(f"[dim]requested_role:[/dim] {requested_role}")
+    if task_type:
+        console.print(f"[dim]task_type:[/dim] {task_type}")
+    if requested_tests:
+        console.print(
+            "[dim]requested_tests:[/dim] " + ", ".join(requested_tests)
+        )
+    if execution_notes:
+        console.print(f"[dim]execution_notes:[/dim] {execution_notes}")
+    if error:
+        console.print(f"[dim]error:[/dim] {error}")
+    console.print("[dim]-------------[/dim]")
+
+
 def chat(
     ctx: typer.Context,
     thread_id: str = typer.Option(
@@ -25,6 +52,11 @@ def chat(
     ),
     user_id: str = typer.Option(
         "default", "--user", "-u", help="Stable user ID for long-term memory."
+    ),
+    debug: bool = typer.Option(
+        False,
+        "--debug",
+        help="Show bounded internal routing and execution state.",
     ),
 ) -> None:
     """Start an interactive chat session with Faust."""
@@ -48,6 +80,10 @@ def chat(
         "user_input": "",
         "intent": None,
         "active_agent": None,
+        "requested_role": None,
+        "task_type": None,
+        "requested_tests": [],
+        "execution_notes": None,
         "messages": [],
         "recalled_memories": [],
         "artifacts": [],
@@ -62,6 +98,8 @@ def chat(
     console.print(
         f"[dim]Thread:[/dim] {thread_id}    [dim]User:[/dim] {user_id}"
     )
+    if debug:
+        console.print("[dim]Debug mode enabled.[/dim]")
     console.print(
         "Type [bold yellow]exit[/bold yellow] or "
         "[bold yellow]quit[/bold yellow] to end.\n"
@@ -88,6 +126,12 @@ def chat(
         state["user_id"] = user_id
         state["intent"] = None
         state["active_agent"] = None
+        state["requested_role"] = None
+        state["task_type"] = None
+        state["requested_tests"] = []
+        state["execution_notes"] = None
+        state["error"] = None
+        state["response"] = ""
 
         try:
             result = graph.invoke(
@@ -114,6 +158,10 @@ def chat(
                 )
             else:
                 console.print("[dim]No response received.[/dim]")
+
+            if debug:
+                _print_debug_state(state)
+                console.print()
 
         except Exception as exc:
             console.print(f"[red]Unexpected error:[/red] {exc}")

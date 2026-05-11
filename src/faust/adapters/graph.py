@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from functools import partial
@@ -82,7 +83,12 @@ def _memory_record_from_item(item) -> MemoryRecord | None:
 def _strip_correction_prefixes(text: str) -> str:
     """Remove lightweight correction words from an extracted value."""
     value = text.strip().rstrip(".")
-    value = re.sub(r"^(actually|no[, ]+|nope[, ]+|it's|it is)\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"^(actually|no[, ]+|nope[, ]+|it's|it is)\s+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
     return value.strip()
 
 
@@ -217,7 +223,10 @@ def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
     if normalized_query and normalized_query in normalized_text:
         score += 100
 
-    if memory.slot == "preference.favorite_editor" and "favorite editor" in normalized_query:
+    if (
+        memory.slot == "preference.favorite_editor"
+        and "favorite editor" in normalized_query
+    ):
         score += 200
 
     if memory.slot == "profile.name" and (
@@ -235,7 +244,10 @@ def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
     ):
         score += 220
 
-    if "favorite editor" in normalized_query and "favorite editor" in normalized_text:
+    if (
+        "favorite editor" in normalized_query
+        and "favorite editor" in normalized_text
+    ):
         score += 80
 
     if "birthdate" in normalized_query and "birthdate" in normalized_text:
@@ -331,15 +343,138 @@ def retrieve_memories(state: FaustState, *, store) -> dict:
     return {"recalled_memories": ranked[: config.memory.max_results]}
 
 
+def classify_task(state: FaustState) -> dict:
+    """Classify the turn into a narrow task type before role routing."""
+    query = _normalize_text(state.get("user_input", ""))
+
+    if not query:
+        return {"task_type": "general"}
+
+    if _is_memory_write(query) or _detect_recall_slot(query):
+        return {"task_type": "memory"}
+
+    coding_markers = (
+        "write code",
+        "implement",
+        "code",
+        "refactor",
+        "debug",
+        "fix this bug",
+        "add tests",
+        "test ",
+        "pytest",
+    )
+    if any(marker in query for marker in coding_markers):
+        return {"task_type": "coding"}
+
+    reasoning_markers = (
+        "plan this",
+        "make a plan",
+        "break this down",
+        "think step by step",
+        "reason through",
+        "design this",
+        "architecture",
+    )
+    if any(marker in query for marker in reasoning_markers):
+        return {"task_type": "reasoning"}
+
+    return {"task_type": "general"}
+
+
+def route_memory(state: FaustState) -> dict:
+    """Decide whether this turn is a memory write, memory recall, or normal flow."""
+    query = state.get("user_input", "")
+    recalled = state.get("recalled_memories", [])
+
+    if _is_memory_write(query):
+        return {
+            "memory_route": "memory_write",
+            "requested_role": None,
+            "execution_notes": "Detected durable memory write.",
+        }
+
+    slot = _detect_recall_slot(query)
+    if slot and _has_recalled_slot(recalled, slot):
+        return {
+            "memory_route": "memory_recall",
+            "requested_role": None,
+            "execution_notes": "Detected deterministic memory recall.",
+        }
+
+    return {
+        "memory_route": "role_router",
+        "execution_notes": "No deterministic memory path selected.",
+    }
+
+
+def should_route_after_memory(state: FaustState) -> str:
+    """Route memory writes and deterministic recall queries before role dispatch."""
+    route = state.get("memory_route")
+
+    if route == "memory_write":
+        return "save_memory"
+    if route == "memory_recall":
+        return "memory_answer"
+    return "role_router"
+
+
+def determine_role(state: FaustState) -> dict:
+    """Pick a minimal model role from the normalized task type."""
+    requested_role = state.get("requested_role")
+    task_type = state.get("task_type")
+
+    if requested_role in {"assistant", "reasoner", "coder"}:
+        role = requested_role
+    elif task_type == "coding":
+        role = "coder"
+    elif task_type == "reasoning":
+        role = "reasoner"
+    else:
+        role = "assistant"
+
+    return {
+        "requested_role": role,
+        "execution_notes": f"Selected role '{role}' for task type '{task_type}'.",
+    }
+
+
+def route_role(state: FaustState) -> str:
+    """Return the graph node name for the selected role."""
+    role = state.get("requested_role")
+
+    if role == "coder":
+        return "coder"
+    if role == "reasoner":
+        return "reasoner"
+    return "assistant"
+
+
 def build_prompt(state: FaustState) -> dict:
-    """Ensure system prompt is first and inject recalled memories."""
+    """Ensure system prompt is first and inject recalled memories and role guidance."""
     current = list(state.get("messages", []))
     config = state.get("config")
     recalled = state.get("recalled_memories", [])
+    requested_role = state.get("requested_role")
+    task_type = state.get("task_type")
 
     system_parts: list[str] = []
     if config:
         system_parts.append(config.system_prompt)
+
+    if requested_role:
+        system_parts.append(
+            f"Active role: {requested_role}. Task type: {task_type or 'general'}."
+        )
+
+    if requested_role == "reasoner":
+        system_parts.append(
+            "Focus on planning, decomposition, tradeoffs, and clear execution steps."
+        )
+    elif requested_role == "coder":
+        system_parts.append(
+            "Focus on implementation details, code changes, and relevant tests."
+        )
 
     if recalled:
         memory_lines = [
@@ -487,39 +622,30 @@ def memory_answer_node(state: FaustState) -> dict:
             "error": None,
             "intent": "memory_recall",
             "active_agent": "memory_answer",
+            "task_type": "memory",
+            "execution_notes": "Answered from deterministic long-term memory recall.",
+            "requested_tests": [],
         }
 
     return {}
 
 
-def route_memory(state: FaustState) -> dict:
-    """Decide whether this turn is a memory write, memory recall, or normal LLM."""
-    query = state.get("user_input", "")
-    recalled = state.get("recalled_memories", [])
-
-    if _is_memory_write(query):
-        return {"memory_route": "memory_write"}
-
-    slot = _detect_recall_slot(query)
-    if slot and _has_recalled_slot(recalled, slot):
-        return {"memory_route": "memory_recall"}
-
-    return {"memory_route": "llm"}
-
-
-def should_use_memory_answer(state: FaustState) -> str:
-    """Route memory writes and deterministic recall queries before the LLM."""
-    route = state.get("memory_route")
-
-    if route == "memory_write":
-        return "save_memory"
-    if route == "memory_recall":
-        return "memory_answer"
-    return "build_prompt"
+def _extract_requested_tests(query: str) -> list[str]:
+    """Extract narrow pytest targets from plain-text requests."""
+    matches = re.findall(
+        r"(tests/[A-Za-z0-9_./-]+(?:::[A-Za-z0-9_./-]+)*)",
+        query,
+        flags=re.IGNORECASE,
+    )
+    deduped: list[str] = []
+    for match in matches:
+        if match not in deduped:
+            deduped.append(match)
+    return deduped
 
 
-def llm_node(state: FaustState, adapter) -> dict:
-    """Call the LLM adapter and collect the full streaming response."""
+def assistant_node(state: FaustState, adapter) -> dict:
+    """General conversation role."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -529,13 +655,204 @@ def llm_node(state: FaustState, adapter) -> dict:
         return {
             "response": full_response,
             "error": None,
+            "intent": state.get("intent") or "general_response",
             "active_agent": "assistant",
+            "requested_tests": [],
+            "execution_notes": "Assistant role completed response generation.",
         }
     except Exception as exc:
         return {
             "response": "",
             "error": str(exc),
+            "intent": state.get("intent") or "general_response",
             "active_agent": "assistant",
+            "requested_tests": [],
+            "execution_notes": "Assistant role failed during response generation.",
+        }
+
+
+def reasoner_node(state: FaustState, adapter) -> dict:
+    """Planning and decomposition role."""
+    message_dicts = [m.to_dict() for m in state["messages"]]
+    full_response = ""
+
+    try:
+        for chunk in adapter.generate(message_dicts, stream=True):
+            full_response += chunk
+        requested_tests = _extract_requested_tests(state.get("user_input", ""))
+        return {
+            "response": full_response,
+            "error": None,
+            "intent": "reasoning",
+            "active_agent": "reasoner",
+            "requested_tests": requested_tests,
+            "execution_notes": "Reasoner role completed planning/decomposition.",
+        }
+    except Exception as exc:
+        return {
+            "response": "",
+            "error": str(exc),
+            "intent": "reasoning",
+            "active_agent": "reasoner",
+            "requested_tests": [],
+            "execution_notes": "Reasoner role failed during planning/decomposition.",
+        }
+
+
+def coder_node(state: FaustState, adapter) -> dict:
+    """Code-focused implementation role."""
+    message_dicts = [m.to_dict() for m in state["messages"]]
+    full_response = ""
+
+    try:
+        for chunk in adapter.generate(message_dicts, stream=True):
+            full_response += chunk
+        requested_tests = _extract_requested_tests(state.get("user_input", ""))
+        return {
+            "response": full_response,
+            "error": None,
+            "intent": "coding",
+            "active_agent": "coder",
+            "requested_tests": requested_tests,
+            "execution_notes": "Coder role completed implementation response.",
+        }
+    except Exception as exc:
+        return {
+            "response": "",
+            "error": str(exc),
+            "intent": "coding",
+            "active_agent": "coder",
+            "requested_tests": [],
+            "execution_notes": "Coder role failed during implementation response.",
+        }
+
+
+def should_run_requested_tests(state: FaustState) -> str:
+    """Only send coding flows with explicit scoped tests into the test node."""
+    if state.get("active_agent") != "coder":
+        return "save_memory"
+
+    requested_tests = state.get("requested_tests", [])
+    if requested_tests:
+        return "run_requested_tests"
+
+    return "save_memory"
+
+
+def run_requested_tests(state: FaustState) -> dict:
+    """Run scoped pytest targets requested by the coding workflow.
+
+    Safety rules:
+    - Only explicit pytest node IDs under tests/ are allowed.
+    - No arbitrary shell commands are accepted.
+    - Results are normalized back into execution_notes.
+    """
+    requested_tests = state.get("requested_tests", [])
+    if not requested_tests:
+        return {
+            "execution_notes": "No scoped tests requested.",
+        }
+
+    valid_targets: list[str] = []
+    rejected_targets: list[str] = []
+
+    for target in requested_tests:
+        cleaned = target.strip()
+        if not cleaned:
+            continue
+
+        if not cleaned.startswith("tests/"):
+            rejected_targets.append(cleaned)
+            continue
+
+        if any(token in cleaned for token in (";", "&&", "||", "|", "`", "$(", "..\\")):
+            rejected_targets.append(cleaned)
+            continue
+
+        test_file = cleaned.split("::", 1)[0]
+        if not Path(test_file).exists():
+            rejected_targets.append(cleaned)
+            continue
+
+        valid_targets.append(cleaned)
+
+    if not valid_targets:
+        notes = ["Scoped test execution skipped: no valid pytest targets."]
+        if rejected_targets:
+            notes.append("Rejected targets: " + ", ".join(rejected_targets))
+        return {
+            "execution_notes": " ".join(notes),
+        }
+
+    command = ["pytest", *valid_targets, "-q"]
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+
+        note_parts = [
+            f"Ran scoped tests: {', '.join(valid_targets)}.",
+            f"Exit code: {completed.returncode}.",
+        ]
+
+        if rejected_targets:
+            note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
+
+        if stdout:
+            note_parts.append("pytest stdout:\n" + stdout)
+
+        if stderr:
+            note_parts.append("pytest stderr:\n" + stderr)
+
+        if completed.returncode == 0:
+            note_parts.append("Scoped pytest run passed.")
+        else:
+            note_parts.append("Scoped pytest run failed.")
+
+        return {
+            "execution_notes": "\n\n".join(note_parts),
+        }
+
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+
+        note_parts = [
+            f"Scoped pytest run timed out after 60 seconds for: {', '.join(valid_targets)}."
+        ]
+
+        if rejected_targets:
+            note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
+
+        if stdout.strip():
+            note_parts.append("pytest stdout before timeout:\n" + stdout.strip())
+
+        if stderr.strip():
+            note_parts.append("pytest stderr before timeout:\n" + stderr.strip())
+
+        return {
+            "execution_notes": "\n\n".join(note_parts),
+            "error": "Scoped pytest execution timed out.",
+        }
+
+    except Exception as exc:
+        note_parts = [
+            f"Scoped pytest execution failed unexpectedly for: {', '.join(valid_targets)}.",
+            f"Error: {exc}",
+        ]
+        if rejected_targets:
+            note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
+
+        return {
+            "execution_notes": "\n\n".join(note_parts),
+            "error": str(exc),
         }
 
 
@@ -610,6 +927,9 @@ def save_memory(state: FaustState, *, store) -> dict:
         "error": None,
         "intent": "memory_write",
         "active_agent": "memory_write",
+        "task_type": "memory",
+        "execution_notes": "Persisted durable memory record.",
+        "requested_tests": [],
     }
 
 
@@ -644,26 +964,51 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
         "retrieve_memories",
         partial(retrieve_memories, store=store),
     )
+    workflow.add_node("classify_task", classify_task)
     workflow.add_node("route_memory", route_memory)
     workflow.add_node("memory_answer", memory_answer_node)
+    workflow.add_node("role_router", determine_role)
     workflow.add_node("build_prompt", build_prompt)
-    workflow.add_node("llm", partial(llm_node, adapter=adapter))
+    workflow.add_node("assistant", partial(assistant_node, adapter=adapter))
+    workflow.add_node("reasoner", partial(reasoner_node, adapter=adapter))
+    workflow.add_node("coder", partial(coder_node, adapter=adapter))
+    workflow.add_node("run_requested_tests", run_requested_tests)
     workflow.add_node("save_memory", partial(save_memory, store=store))
 
     workflow.set_entry_point("retrieve_memories")
-    workflow.add_edge("retrieve_memories", "route_memory")
+    workflow.add_edge("retrieve_memories", "classify_task")
+    workflow.add_edge("classify_task", "route_memory")
     workflow.add_conditional_edges(
         "route_memory",
-        should_use_memory_answer,
+        should_route_after_memory,
         {
             "save_memory": "save_memory",
             "memory_answer": "memory_answer",
-            "build_prompt": "build_prompt",
+            "role_router": "role_router",
         },
     )
     workflow.add_edge("memory_answer", END)
-    workflow.add_edge("build_prompt", "llm")
-    workflow.add_edge("llm", "save_memory")
+    workflow.add_edge("role_router", "build_prompt")
+    workflow.add_conditional_edges(
+        "build_prompt",
+        route_role,
+        {
+            "assistant": "assistant",
+            "reasoner": "reasoner",
+            "coder": "coder",
+        },
+    )
+    workflow.add_edge("assistant", "save_memory")
+    workflow.add_edge("reasoner", "save_memory")
+    workflow.add_conditional_edges(
+        "coder",
+        should_run_requested_tests,
+        {
+            "run_requested_tests": "run_requested_tests",
+            "save_memory": "save_memory",
+        },
+    )
+    workflow.add_edge("run_requested_tests", "save_memory")
     workflow.add_edge("save_memory", END)
 
     checkpointer = make_checkpointer(config)

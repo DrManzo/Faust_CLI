@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Literal, TypedDict
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
+
+try:
+    from typing import NotRequired, TypedDict
+except ImportError:  # pragma: no cover
+    from typing_extensions import NotRequired, TypedDict
 
 
 class Role(str, Enum):
@@ -104,17 +109,37 @@ class AppConfig(BaseModel):
 
 
 class FaustState(TypedDict):
-    """Shared state object passed between all LangGraph nodes."""
+    """Shared state object passed between all LangGraph nodes.
 
+    Bucket guide:
+    - Checkpoint memory: resumable thread/session state and normalized outputs.
+    - Long-term memory: durable user facts live in the memory store as MemoryRecord
+      entries; recalled_memories is only the per-turn projection of that store.
+    - Ephemeral state: transient routing hints, planning notes, and scoped test
+      requests that should not be treated as durable memory.
+    """
+
+    # Checkpoint memory: session continuity and runtime configuration.
     session: Session
     config: AppConfig
     user_id: str
     user_input: str
+
+    # Checkpoint memory: normalized turn outputs and routing outcomes.
     intent: str | None
-    memory_route: str | None
     active_agent: str | None
+    response: str
+    error: str | None
+
+    # Checkpoint memory: conversation context and retrieved durable memories.
     messages: List[Message]
     recalled_memories: List[MemoryRecord]
     artifacts: List[str]
-    response: str
-    error: str | None
+
+    # Ephemeral state: transient routing and execution hints.
+    memory_route: str | None
+    requested_role: NotRequired[str | None]
+    task_type: NotRequired[str | None]
+    ephemeral_context: NotRequired[dict[str, str] | None]
+    requested_tests: NotRequired[List[str]]
+    execution_notes: NotRequired[str | None]

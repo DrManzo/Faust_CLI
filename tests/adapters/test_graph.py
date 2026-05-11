@@ -9,10 +9,14 @@ from langgraph.store.memory import InMemoryStore
 from faust.adapters.graph import (
     _detect_recall_slot,
     _has_recalled_slot,
+    assistant_node,
     build_graph,
     build_prompt,
-    llm_node,
+    classify_task,
+    coder_node,
+    determine_role,
     memory_answer_node,
+    reasoner_node,
     retrieve_memories,
     route_memory,
     save_memory,
@@ -107,8 +111,24 @@ def test_build_prompt_includes_recalled_memories():
     assert "User prefers concise answers." in system_message.content
 
 
-def test_llm_node_concatenates_streamed_chunks():
-    """llm_node should join adapter chunks into one response string."""
+def test_build_prompt_includes_role_guidance_when_requested_role_set():
+    """build_prompt should inject role-specific guidance for reasoner and coder."""
+    state = make_state(
+        messages=[Message(role=Role.USER, content="Plan this feature")],
+    )
+    state["requested_role"] = "reasoner"
+    state["task_type"] = "reasoning"
+
+    result = build_prompt(state)
+    system_message = result["messages"][0]
+
+    assert system_message.role == Role.SYSTEM
+    assert "Active role: reasoner" in system_message.content
+    assert "planning, decomposition" in system_message.content
+
+
+def test_assistant_node_concatenates_streamed_chunks():
+    """assistant_node should join adapter chunks into one response string."""
     adapter = FakeAdapter(chunks=["Fa", "ust"])
     state = make_state(
         messages=[
@@ -117,18 +137,17 @@ def test_llm_node_concatenates_streamed_chunks():
         ]
     )
 
-    result = llm_node(state, adapter=adapter)
+    result = assistant_node(state, adapter=adapter)
 
     assert result["response"] == "Faust"
     assert result["error"] is None
-    assert adapter.last_messages == [
-        {"role": "system", "content": "You are Faust."},
-        {"role": "user", "content": "Say your name"},
-    ]
+    assert result["active_agent"] == "assistant"
+    assert result["requested_tests"] == []
+    assert "Assistant role completed" in result["execution_notes"]
 
 
-def test_llm_node_returns_error_on_adapter_failure():
-    """llm_node should return an error string instead of raising."""
+def test_assistant_node_returns_error_on_adapter_failure():
+    """assistant_node should return an error string instead of raising."""
     adapter = FakeAdapter(should_fail=True)
     state = make_state(
         messages=[
@@ -136,10 +155,127 @@ def test_llm_node_returns_error_on_adapter_failure():
         ]
     )
 
-    result = llm_node(state, adapter=adapter)
+    result = assistant_node(state, adapter=adapter)
 
     assert result["response"] == ""
     assert "fake adapter failure" in result["error"]
+    assert result["active_agent"] == "assistant"
+
+
+def test_reasoner_node_sets_active_agent_and_execution_notes():
+    """reasoner_node should set active_agent to 'reasoner' and log execution."""
+    adapter = FakeAdapter(chunks=["Plan: step 1, step 2"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="Plan this feature")],
+    )
+
+    result = reasoner_node(state, adapter=adapter)
+
+    assert result["response"] == "Plan: step 1, step 2"
+    assert result["error"] is None
+    assert result["active_agent"] == "reasoner"
+    assert result["intent"] == "reasoning"
+    assert "Reasoner role completed" in result["execution_notes"]
+
+
+def test_coder_node_sets_active_agent_and_execution_notes():
+    """coder_node should set active_agent to 'coder' and log execution."""
+    adapter = FakeAdapter(chunks=["def foo(): pass"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="Write code for this")],
+    )
+
+    result = coder_node(state, adapter=adapter)
+
+    assert result["response"] == "def foo(): pass"
+    assert result["error"] is None
+    assert result["active_agent"] == "coder"
+    assert result["intent"] == "coding"
+    assert "Coder role completed" in result["execution_notes"]
+
+
+def test_classify_task_detects_memory_task():
+    """classify_task should identify memory write/recall queries as memory tasks."""
+    state = make_state(user_input="remember that my favorite editor is Vim")
+    result = classify_task(state)
+    assert result["task_type"] == "memory"
+
+    state = make_state(user_input="What is my favorite editor?")
+    result = classify_task(state)
+    assert result["task_type"] == "memory"
+
+
+def test_classify_task_detects_coding_task():
+    """classify_task should identify coding-related queries."""
+    state = make_state(user_input="write code for a fizzbuzz function")
+    result = classify_task(state)
+    assert result["task_type"] == "coding"
+
+    state = make_state(user_input="add tests for this module")
+    result = classify_task(state)
+    assert result["task_type"] == "coding"
+
+
+def test_classify_task_detects_reasoning_task():
+    """classify_task should identify planning and decomposition queries."""
+    state = make_state(user_input="plan this feature step by step")
+    result = classify_task(state)
+    assert result["task_type"] == "reasoning"
+
+    state = make_state(user_input="think through the architecture")
+    result = classify_task(state)
+    assert result["task_type"] == "reasoning"
+
+
+def test_classify_task_defaults_to_general():
+    """classify_task should default to general for normal queries."""
+    state = make_state(user_input="Hello, how are you?")
+    result = classify_task(state)
+    assert result["task_type"] == "general"
+
+
+def test_determine_role_selects_coder_for_coding_task():
+    """determine_role should map coding tasks to coder role."""
+    state = make_state(user_input="implement fizzbuzz")
+    state["task_type"] = "coding"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "coder"
+    assert "coder" in result["execution_notes"]
+
+
+def test_determine_role_selects_reasoner_for_reasoning_task():
+    """determine_role should map reasoning tasks to reasoner role."""
+    state = make_state(user_input="plan this feature")
+    state["task_type"] = "reasoning"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "reasoner"
+    assert "reasoner" in result["execution_notes"]
+
+
+def test_determine_role_selects_assistant_for_general_task():
+    """determine_role should map general tasks to assistant role."""
+    state = make_state(user_input="Hello")
+    state["task_type"] = "general"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "assistant"
+    assert "assistant" in result["execution_notes"]
+
+
+def test_determine_role_respects_explicit_requested_role():
+    """determine_role should honor an explicit requested_role if already set."""
+    state = make_state(user_input="Hello")
+    state["task_type"] = "general"
+    state["requested_role"] = "coder"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "coder"
 
 
 def test_save_memory_ignores_non_memory_requests():
@@ -177,6 +313,9 @@ def test_save_memory_returns_recalled_record():
     assert memory.text == "The user's favorite editor is Neovim."
     assert memory.slot == "preference.favorite_editor"
     assert memory.category == "preference"
+    assert result["task_type"] == "memory"
+    assert result["active_agent"] == "memory_write"
+    assert "Persisted durable memory" in result["execution_notes"]
 
 
 def test_retrieve_memories_returns_saved_memory_for_same_user():
@@ -240,6 +379,7 @@ def test_build_graph_runs_end_to_end():
     assert result["error"] is None
     assert result["messages"][0].role == Role.SYSTEM
     assert result["messages"][1].role == Role.USER
+    assert result["active_agent"] == "assistant"
 
 
 def test_sqlite_memory_persists_across_graph_instances(tmp_path):
@@ -290,7 +430,7 @@ def test_sqlite_memory_persists_across_graph_instances(tmp_path):
 
     recalled = result.get("recalled_memories", [])
     assert any("favorite editor is Neovim" in memory.text for memory in recalled)
-    
+
     # Step 6: Verify deterministic memory answer instead of LLM fallback
     assert result["response"] == "Your favorite editor is Neovim."
     assert result["intent"] == "memory_recall"
@@ -355,20 +495,8 @@ def test_memory_answer_node_sets_intent_and_active_agent():
     assert result["error"] is None
     assert result.get("intent") == "memory_recall"
     assert result.get("active_agent") == "memory_answer"
-
-
-def test_llm_node_sets_active_agent():
-    """llm_node should set active_agent to 'assistant' when it runs."""
-    adapter = FakeAdapter(chunks=["Hi"])
-    state = make_state(
-        messages=[Message(role=Role.USER, content="Hello")],
-    )
-
-    result = llm_node(state, adapter=adapter)
-
-    assert result["response"] == "Hi"
-    assert result["error"] is None
-    assert result.get("active_agent") == "assistant"
+    assert result.get("task_type") == "memory"
+    assert "deterministic long-term memory recall" in result["execution_notes"]
 
 
 def test_graph_preserves_artifacts_list():
@@ -401,10 +529,18 @@ def test_graph_preserves_artifacts_list():
 
 def test_detect_recall_slot_favorite_editor_variants():
     """_detect_recall_slot should recognize favorite editor phrasings."""
-    assert _detect_recall_slot("What is my favorite editor?") == "preference.favorite_editor"
-    assert _detect_recall_slot("which editor do i prefer") == "preference.favorite_editor"
+    assert (
+        _detect_recall_slot("What is my favorite editor?")
+        == "preference.favorite_editor"
+    )
+    assert (
+        _detect_recall_slot("which editor do i prefer") == "preference.favorite_editor"
+    )
     assert _detect_recall_slot("what editor do i use") == "preference.favorite_editor"
-    assert _detect_recall_slot("what's my preferred editor") == "preference.favorite_editor"
+    assert (
+        _detect_recall_slot("what's my preferred editor")
+        == "preference.favorite_editor"
+    )
 
 
 def test_detect_recall_slot_name_variants():
@@ -473,6 +609,7 @@ def test_route_memory_returns_memory_write_for_remember_input():
     result = route_memory(state)
 
     assert result["memory_route"] == "memory_write"
+    assert "memory write" in result["execution_notes"]
 
 
 def test_route_memory_returns_memory_recall_when_slot_exists():
@@ -497,10 +634,11 @@ def test_route_memory_returns_memory_recall_when_slot_exists():
     result = route_memory(state)
 
     assert result["memory_route"] == "memory_recall"
+    assert "deterministic memory recall" in result["execution_notes"]
 
 
-def test_route_memory_returns_llm_when_slot_missing():
-    """route_memory should fall back to llm when the slot is not present."""
+def test_route_memory_returns_role_router_when_slot_missing():
+    """route_memory should fall back to role_router when the slot is not present."""
     state = make_state(
         user_input="What is my favorite editor?",
         user_id="javier",
@@ -508,16 +646,16 @@ def test_route_memory_returns_llm_when_slot_missing():
 
     result = route_memory(state)
 
-    assert result["memory_route"] == "llm"
+    assert result["memory_route"] == "role_router"
 
 
-def test_route_memory_returns_llm_for_normal_query():
-    """route_memory should route normal queries to llm."""
+def test_route_memory_returns_role_router_for_normal_query():
+    """route_memory should route normal queries to role_router."""
     state = make_state(user_input="How are you today?")
 
     result = route_memory(state)
 
-    assert result["memory_route"] == "llm"
+    assert result["memory_route"] == "role_router"
 
 
 def test_graph_returns_deterministic_memory_answer_without_llm_fallback():
@@ -551,6 +689,7 @@ def test_graph_returns_deterministic_memory_answer_without_llm_fallback():
     assert result["intent"] == "memory_recall"
     assert result["active_agent"] == "memory_answer"
 
+
 def test_save_memory_accepts_implicit_name_statement():
     """save_memory should persist a natural self-fact name statement."""
     store = InMemoryStore()
@@ -582,7 +721,10 @@ def test_save_memory_accepts_implicit_birthday_statement():
     memory = result["recalled_memories"][0]
     assert memory.slot == "profile.birthdate"
     assert memory.text == "The user's birthdate is April 4th 1994."
-    assert result["response"] == "Okay — I'll remember that your birthdate is April 4th 1994."
+    assert (
+        result["response"]
+        == "Okay — I'll remember that your birthdate is April 4th 1994."
+    )
 
 
 def test_save_memory_accepts_implicit_favorite_editor_statement():
@@ -734,3 +876,246 @@ def test_graph_returns_deterministic_birthdate_answer_from_implicit_write():
     assert result["response"] == "Your birthdate is April 4th 1994."
     assert result["intent"] == "memory_recall"
     assert result["active_agent"] == "memory_answer"
+
+
+# ========== Step 7.1: Role Routing Tests ==========
+
+
+def test_graph_routes_coding_query_to_coder_node():
+    """Graph should route code-related queries to the coder role."""
+    adapter = FakeAdapter(chunks=["def fizzbuzz(): ..."])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    state = make_state(
+        user_input="write code for fizzbuzz",
+        config=config,
+    )
+
+    result = graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "coding-test", "user_id": "test-user"}},
+    )
+
+    assert result["active_agent"] == "coder"
+    assert result["intent"] == "coding"
+    assert "def fizzbuzz" in result["response"]
+
+
+def test_graph_routes_reasoning_query_to_reasoner_node():
+    """Graph should route planning queries to the reasoner role."""
+    adapter = FakeAdapter(chunks=["Plan: step 1, step 2"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    state = make_state(
+        user_input="plan this feature step by step",
+        config=config,
+    )
+
+    result = graph.invoke(
+        state,
+        config={
+            "configurable": {"thread_id": "reasoning-test", "user_id": "test-user"}
+        },
+    )
+
+    assert result["active_agent"] == "reasoner"
+    assert result["intent"] == "reasoning"
+    assert "Plan" in result["response"]
+
+
+def test_graph_routes_general_query_to_assistant_node():
+    """Graph should route general queries to the assistant role."""
+    adapter = FakeAdapter(chunks=["Hello, I'm here to help."])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    state = make_state(
+        user_input="Hello, how are you?",
+        config=config,
+    )
+
+    result = graph.invoke(
+        state,
+        config={"configurable": {"thread_id": "general-test", "user_id": "test-user"}},
+    )
+
+    assert result["active_agent"] == "assistant"
+    assert "Hello" in result["response"]
+
+    # ========== Step 7.2: Scoped Test Execution Tests ==========
+
+import subprocess
+
+from faust.adapters.graph import run_requested_tests, should_run_requested_tests
+
+
+def test_should_run_requested_tests_routes_coder_with_requested_tests():
+    """Coder flows with requested tests should route into run_requested_tests."""
+    state = make_state(user_input="write code")
+    state["active_agent"] = "coder"
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "run_requested_tests"
+
+
+def test_should_run_requested_tests_skips_when_not_coder():
+    """Non-coder flows should skip scoped test execution."""
+    state = make_state(user_input="plan this")
+    state["active_agent"] = "reasoner"
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "save_memory"
+
+
+def test_should_run_requested_tests_skips_when_no_requested_tests():
+    """Coder flows without requested tests should skip scoped test execution."""
+    state = make_state(user_input="write code")
+    state["active_agent"] = "coder"
+    state["requested_tests"] = []
+
+    result = should_run_requested_tests(state)
+
+    assert result == "save_memory"
+
+
+def test_run_requested_tests_returns_noop_when_empty():
+    """run_requested_tests should no-op when no tests were requested."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = []
+
+    result = run_requested_tests(state)
+
+    assert result["execution_notes"] == "No scoped tests requested."
+
+
+def test_run_requested_tests_rejects_invalid_targets():
+    """run_requested_tests should reject non-tests paths and unsafe targets."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "src/faust/adapters/graph.py",
+        "tests/adapters/test_graph.py; rm -rf /",
+        "tests/does_not_exist.py",
+    ]
+
+    result = run_requested_tests(state)
+
+    assert "no valid pytest targets" in result["execution_notes"].lower()
+    assert "Rejected targets:" in result["execution_notes"]
+
+
+def test_run_requested_tests_executes_valid_pytest_targets(monkeypatch):
+    """run_requested_tests should execute valid scoped pytest targets."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    captured = {}
+
+    class FakeCompletedProcess:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = "1 passed in 0.05s"
+            self.stderr = ""
+
+    def fake_run(command, capture_output, text, timeout, check):
+        captured["command"] = command
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["timeout"] = timeout
+        captured["check"] = check
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_requested_tests(state)
+
+    assert captured["command"] == [
+        "pytest",
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end",
+        "-q",
+    ]
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert captured["timeout"] == 60
+    assert captured["check"] is False
+    assert "Ran scoped tests:" in result["execution_notes"]
+    assert "Exit code: 0." in result["execution_notes"]
+    assert "Scoped pytest run passed." in result["execution_notes"]
+    assert "1 passed in 0.05s" in result["execution_notes"]
+
+
+def test_run_requested_tests_records_failed_pytest_run(monkeypatch):
+    """run_requested_tests should record failing pytest output."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    class FakeCompletedProcess:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = "1 failed in 0.04s"
+            self.stderr = "AssertionError: boom"
+
+    def fake_run(command, capture_output, text, timeout, check):
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_requested_tests(state)
+
+    assert "Exit code: 1." in result["execution_notes"]
+    assert "Scoped pytest run failed." in result["execution_notes"]
+    assert "1 failed in 0.04s" in result["execution_notes"]
+    assert "AssertionError: boom" in result["execution_notes"]
+
+
+def test_run_requested_tests_handles_timeout(monkeypatch):
+    """run_requested_tests should normalize timeout output and set error."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    def fake_run(command, capture_output, text, timeout, check):
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=60,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_requested_tests(state)
+
+    assert result["error"] == "Scoped pytest execution timed out."
+    assert "timed out after 60 seconds" in result["execution_notes"]
+    assert "partial stdout" in result["execution_notes"]
+    assert "partial stderr" in result["execution_notes"]
+
+
+def test_run_requested_tests_handles_unexpected_exception(monkeypatch):
+    """run_requested_tests should normalize unexpected subprocess errors."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    def fake_run(command, capture_output, text, timeout, check):
+        raise RuntimeError("subprocess exploded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_requested_tests(state)
+
+    assert result["error"] == "subprocess exploded"
+    assert "failed unexpectedly" in result["execution_notes"]
+    assert "subprocess exploded" in result["execution_notes"]

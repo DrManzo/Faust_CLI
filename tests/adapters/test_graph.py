@@ -1,18 +1,23 @@
 """Tests for LangGraph wiring in faust.adapters.graph."""
 
+
 from __future__ import annotations
+
 
 from faust.adapters.graph import build_prompt, llm_node, build_graph
 from faust.core.models import AppConfig, Message, Role, Session
 
 
+
 class FakeAdapter:
     """Small fake adapter that yields deterministic chunks."""
+
 
     def __init__(self, chunks=None, should_fail: bool = False):
         self.chunks = chunks or ["Hello ", "world"]
         self.should_fail = should_fail
         self.last_messages = None
+
 
     def generate(self, messages, stream: bool = True):
         self.last_messages = messages
@@ -22,10 +27,12 @@ class FakeAdapter:
             yield chunk
 
 
+
 def make_state(messages=None):
     """Minimal valid FaustState payload for graph tests."""
     config = AppConfig()
     session = Session(id="test-session", model=config.model)
+
 
     return {
         "session": session,
@@ -37,6 +44,7 @@ def make_state(messages=None):
     }
 
 
+
 def test_build_prompt_injects_system_message_when_missing():
     """build_prompt should prepend a system message when one is absent."""
     state = make_state(
@@ -45,14 +53,17 @@ def test_build_prompt_injects_system_message_when_missing():
         ]
     )
 
+
     result = build_prompt(state)
     messages = result["messages"]
+
 
     assert len(messages) == 2
     assert messages[0].role == Role.SYSTEM
     assert messages[0].content == state["config"].system_prompt
     assert messages[1].role == Role.USER
     assert messages[1].content == "Hi"
+
 
 
 def test_build_prompt_does_not_duplicate_existing_system_message():
@@ -64,12 +75,15 @@ def test_build_prompt_does_not_duplicate_existing_system_message():
         ]
     )
 
+
     result = build_prompt(state)
     messages = result["messages"]
+
 
     assert len(messages) == 2
     assert messages[0].role == Role.SYSTEM
     assert messages[0].content == "Existing system prompt"
+
 
 
 def test_llm_node_concatenates_streamed_chunks():
@@ -82,7 +96,9 @@ def test_llm_node_concatenates_streamed_chunks():
         ]
     )
 
+
     result = llm_node(state, adapter=adapter)
+
 
     assert result["response"] == "Faust"
     assert result["error"] is None
@@ -90,6 +106,7 @@ def test_llm_node_concatenates_streamed_chunks():
         {"role": "system", "content": "You are Faust."},
         {"role": "user", "content": "Say your name"},
     ]
+
 
 
 def test_llm_node_returns_error_on_adapter_failure():
@@ -101,22 +118,27 @@ def test_llm_node_returns_error_on_adapter_failure():
         ]
     )
 
+
     result = llm_node(state, adapter=adapter)
+
 
     assert result["response"] == ""
     assert "fake adapter failure" in result["error"]
 
 
+
 def test_build_graph_runs_end_to_end():
     """Compiled graph should inject prompt and produce a full response."""
     adapter = FakeAdapter(chunks=["Hello ", "from graph"])
-    graph = build_graph(adapter)
-
     state = make_state(
         messages=[
             Message(role=Role.USER, content="Test graph"),
         ]
     )
+
+
+    graph = build_graph(adapter, state["config"])
+
 
     result = graph.invoke(
         state,
@@ -126,6 +148,7 @@ def test_build_graph_runs_end_to_end():
             }
         },
     )
+
 
     assert result["response"] == "Hello from graph"
     assert result["error"] is None

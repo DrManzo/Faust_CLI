@@ -1,7 +1,6 @@
 # Faust — Local CLI LLM
 
-A local, offline-first CLI for interacting with LLMs via Ollama or any
-OpenAI-compatible server, with a LangGraph-powered agent layer.
+A local, offline-first CLI for interacting with LLMs via Ollama or any OpenAI-compatible server, with a LangGraph-powered agent layer and configurable checkpoint persistence.[1][2]
 
 ## Quickstart
 
@@ -17,13 +16,17 @@ make run
 
 # 4. Or run a single prompt
 faust run "Explain recursion in one sentence"
+
+# 5. Run the test suite
+python -m pytest -q
+faust-tests
 ```
 
 ## Requirements
 
-- Python 3.12+
-- [uv](https://github.com/astral-sh/uv) package manager
-- [Ollama](https://ollama.com) running locally (default backend)
+- Python 3.12+[1]
+- [uv](https://github.com/astral-sh/uv) package manager[1]
+- [Ollama](https://ollama.com) running locally for the default backend[1]
 
 ## Recommended Models
 
@@ -35,12 +38,23 @@ faust run "Explain recursion in one sentence"
 
 ## Data Storage
 
-Faust stores LangGraph checkpoints in a local SQLite database:
+Faust supports local LangGraph checkpoint persistence and project-local runtime data.[1][2]
 
-- `data/faust.db` — LangGraph SqliteSaver database
-- `data/sessions/` — optional JSON session exports
+- `data/faust.db` — local LangGraph SQLite checkpoint database when SQLite persistence is enabled.[1]
+- `data/sessions/` — optional JSON session exports.[1]
+- `data/` — created automatically at runtime and ignored by version control.[1]
 
-The `data/` folder is ignored by version control and is created automatically at runtime.
+## Testing
+
+The current automated baseline is 17 passing tests, and the recommended local validation commands are shown below.[3]
+
+```bash
+python -m pytest -q
+python -m pytest -vv
+faust-tests
+```
+
+Using `python -m pytest` is the safest option in virtual environments because it avoids shell PATH issues with the `pytest` executable.[3]
 
 ## Adding a New Component
 

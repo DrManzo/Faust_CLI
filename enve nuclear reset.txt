@@ -1,0 +1,14 @@
+# 1. Deactivate
+deactivate
+
+# 2. Clear pip cache
+pip cache purge
+
+# 3. Remove venv
+rm -rf .venv
+
+# 4. Recreate everything fresh
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .

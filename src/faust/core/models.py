@@ -58,6 +58,12 @@ class OpenAICompatConfig(BaseModel):
     api_key: str = "local"
 
 
+class SqliteSettings(BaseModel):
+    """Settings for optional SQLite checkpoint persistence."""
+
+    path: str = "data/faust.db"
+
+
 class AppConfig(BaseModel):
     """Runtime configuration loaded from configs/default.yaml."""
 
@@ -70,9 +76,13 @@ class AppConfig(BaseModel):
     # High-level system prompt for the assistant
     system_prompt: str = "You are Faust, a local AI assistant."
 
+    # Checkpointing / persistence
+    checkpointer_backend: Literal["memory", "sqlite"] = "memory"
+
     # Backend-specific nested configs
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     openai_compat: OpenAICompatConfig = Field(default_factory=OpenAICompatConfig)
+    sqlite: SqliteSettings = Field(default_factory=SqliteSettings)
 
 
 class FaustState(TypedDict):

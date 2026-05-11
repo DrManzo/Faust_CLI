@@ -1,18 +1,26 @@
 # Faust — Default Configuration
-# Edit values here or use: faust config set <key> <value>
+# Edit values here or use: faust config set
 
-backend: "ollama"               # "ollama" | "openai_compat"
-model: "llama3:8b"              # Default Ollama model for Faust
-temperature: 0.7                # Float 0.0-2.0; lower = more deterministic
-context_window: 8192            # Max tokens maintained in context history
+backend: "ollama"        # "ollama" | "openai_compat"
+model: "llama3:8b"       # Default Ollama model for Faust
+temperature: 0.7         # Float 0.0-2.0; lower = more deterministic
+context_window: 8192     # Max tokens maintained in context history
 
 system_prompt: |
   You are Faust, a local AI assistant.
   You are direct, precise, and technically capable.
 
+# Checkpointing / persistence
+# "memory" keeps everything in process memory (default, lightweight)
+# "sqlite" enables persistent LangGraph checkpointing in a local SQLite database.
+checkpointer_backend: "memory"
+
+sqlite:
+  path: "data/faust.db"
+
 ollama:
-  base_url: "http://localhost:11434"   # Default Ollama endpoint
-  request_timeout: 120                 # Seconds
+  base_url: "http://localhost:11434"  # Default Ollama endpoint
+  request_timeout: 120                # Seconds
 
 # OpenAI-compatible backend (only used if backend = openai_compat)
 openai_compat:

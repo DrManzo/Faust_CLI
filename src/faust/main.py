@@ -26,7 +26,8 @@ def main() -> None:
                 "Valid options: 'ollama', 'openai_compat'"
             )
 
-    graph = build_graph(adapter)
+    graph = build_graph(adapter, config)
+
     app(obj={"adapter": adapter, "config": config, "graph": graph})
 
 

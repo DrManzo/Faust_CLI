@@ -976,7 +976,9 @@ def make_checkpointer(config: AppConfig):
         ("faust.core.models", "MemoryRecord"),
         ("faust.core.models", "Session"),
     )
-
+    # NOTE: JsonPlusSerializer in the installed LangGraph version does not support
+    # allowed_objects. Revisit on library upgrade to address the pending deprecation
+    # warning about the default allowed_objects value.
     serde = JsonPlusSerializer(
     allowed_msgpack_modules=allowed_msgpack_modules
     )
@@ -1048,3 +1050,5 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
     checkpointer = make_checkpointer(config)
 
     return workflow.compile(checkpointer=checkpointer, store=store)
+
+

@@ -125,7 +125,7 @@ class FaustState(TypedDict):
     user_id: str
     user_input: str
 
-    # Checkpoint memory: normalized turn outputs and routing outcomes.
+    # Checkpoint memory: normalized turn outputs, routing outcomes, and resumable state.
     intent: str | None
     active_agent: str | None
     response: str
@@ -136,7 +136,8 @@ class FaustState(TypedDict):
     recalled_memories: List[MemoryRecord]
     artifacts: List[str]
 
-    # Ephemeral state: transient routing and execution hints.
+
+    # Ephemeral state: transient routing, planning, correction, and execution hints.
     memory_route: str | None
     requested_role: NotRequired[str | None]
     task_type: NotRequired[str | None]

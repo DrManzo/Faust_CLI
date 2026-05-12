@@ -433,9 +433,6 @@ def classify_task(state: FaustState) -> dict:
     if not query:
         return {"task_type": "general"}
 
-    if _is_memory_write(query) or _detect_recall_slot(query):
-        return {"task_type": "memory"}
-
     coding_markers = (
         "write code",
         "implement",
@@ -461,6 +458,9 @@ def classify_task(state: FaustState) -> dict:
     )
     if any(marker in query for marker in reasoning_markers):
         return {"task_type": "reasoning"}
+
+    if _is_memory_write(query) or _detect_recall_slot(query):
+        return {"task_type": "memory"}
 
     return {"task_type": "general"}
 

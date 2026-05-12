@@ -2,7 +2,7 @@
 
 Faust is a local, offline-first CLI assistant for interacting with language models through Ollama or any OpenAI-compatible server. It uses Typer for the CLI, LangGraph for agent orchestration, and configurable local checkpoint persistence for conversation state.
 
-Faust now includes an initial long-term memory layer with deterministic recall for a small set of supported user facts, plus natural memory writes for simple self-fact statements such as name, birthdate, and favorite editor.
+Faust includes a long-term memory layer with deterministic recall for supported user facts, natural memory writes for simple self-fact statements, and minimal multi-role routing for assistant, reasoner, and coder workflows.
 
 ## Features
 
@@ -20,6 +20,10 @@ Faust now includes an initial long-term memory layer with deterministic recall f
 - `I am Javier`
 - `my birthday is April 4th 1994`
 - `my favorite editor is Vim`
+- Multi-role graph routing:
+- `assistant` for general conversation
+- `reasoner` for planning and decomposition
+- `coder` for code-oriented tasks with scoped test execution
 
 ## Quickstart
 
@@ -92,6 +96,12 @@ Faust: Okay — I'll remember that your name is Javier.
 
 : What is my name?
 Faust: Your name is Javier.
+
+: Plan this: add support for favorite shell
+Faust: [reasoner output with decomposition steps]
+
+: Write code to add a regression test for location correction
+Faust: [coder output with scoped pytest execution]
 ```
 
 ### One-shot prompts
@@ -109,11 +119,11 @@ faust config
 
 ## Memory behavior
 
-Faust currently uses three practical layers of state:
+Faust uses three practical layers of state:
 
 - **Checkpoint memory** for conversation/thread continuity through LangGraph persistence.
 - **Long-term memory** for durable user facts and preferences.
-- **In-memory state** during graph execution for short-lived routing and response flow.
+- **Ephemeral state** during graph execution for short-lived routing and response flow.
 
 Today, the supported durable long-term memory slots are:
 
@@ -159,6 +169,16 @@ What is my favorite editor?
 
 Open-ended or derived questions still use the normal model path when appropriate.
 
+## Role routing
+
+Faust uses minimal task classification to route turns through appropriate graph paths:
+
+- **assistant** — general conversation and Q&A
+- **reasoner** — planning, decomposition, and multi-step thinking
+- **coder** — code generation, refactoring, and scoped test execution
+
+The classifier prioritizes coding and reasoning markers before memory-slot keyword matches to prevent false positives during planning workflows.
+
 ## Data storage
 
 Faust stores runtime data locally.
@@ -172,7 +192,7 @@ This project is configured so local runtime data and personal memory artifacts a
 
 ## Testing
 
-The current automated baseline is **47 passing tests**.
+The current automated baseline is **47+ passing tests**.
 
 Recommended local validation commands:
 
@@ -183,6 +203,16 @@ faust-tests
 ```
 
 Using `python -m pytest` is the safest option inside virtual environments because it avoids shell PATH issues with the standalone `pytest` executable.
+
+### Scoped test execution
+
+The coder role supports explicit scoped test requests:
+
+```text
+Write code to add a regression test for location correction and run tests/adapters/test_graph.py::test_location_correction
+```
+
+Faust will execute the specified pytest target and return results with exit codes and output.
 
 ## Project structure
 
@@ -202,9 +232,10 @@ tests/
 ## Development notes
 
 - The default local workflow is Ollama-first.
-- The graph currently supports deterministic routing for a small supported set of memory facts.
+- The graph supports deterministic routing for a small supported set of memory facts.
 - The current memory system is intentionally narrow and durable rather than broad and fuzzy.
-- The next architectural step is to formalize memory buckets more explicitly across checkpoint memory, long-term memory, and ephemeral execution state.
+- Role routing uses minimal shared-state fields and normalized execution outputs.
+- Scoped test execution is constrained to explicit pytest targets under `tests/` for security.
 
 ## Adding a new component
 
@@ -219,8 +250,10 @@ Faust currently has:
 - LangGraph graph wiring,
 - checkpoint persistence,
 - Ollama and OpenAI-compatible adapters,
-- a first long-term memory foundation,
+- a long-term memory foundation,
 - deterministic recall for supported user facts,
-- and tested implicit memory writes for simple self-fact statements.
+- tested implicit memory writes for simple self-fact statements,
+- minimal multi-role routing for assistant, reasoner, and coder flows,
+- and scoped pytest execution for code-oriented workflows.
 
-This is an actively evolving local assistant project, with the current focus on durable architecture and reliable offline-first behavior.
+This is an actively evolving local assistant project, with the current focus on durable architecture, reliable offline-first behavior, and practical multi-role graph routing.

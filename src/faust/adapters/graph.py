@@ -978,7 +978,7 @@ def make_checkpointer(config: AppConfig):
     )
 
     serde = JsonPlusSerializer(
-        allowed_msgpack_modules=allowed_msgpack_modules
+    allowed_msgpack_modules=allowed_msgpack_modules
     )
 
     if config.checkpointer_backend == "sqlite":

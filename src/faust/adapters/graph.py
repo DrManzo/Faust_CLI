@@ -1,14 +1,18 @@
 """LangGraph state graph for Faust."""
 
+
 from __future__ import annotations
+
 
 import re
 import subprocess
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
+
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -17,16 +21,18 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.store.memory import InMemoryStore
 
+
 try:
     from langgraph.store.sqlite import SqliteStore
 except ImportError:  # pragma: no cover
     SqliteStore = None
 
+
 from faust.core.models import AppConfig, FaustState, MemoryRecord, Message, Role
 
-from dataclasses import dataclass
 
 _GRAPH_RESOURCES: list[ExitStack] = []
+
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,7 @@ class SlotSpec:
     confirm_template: str
     score_phrases: tuple[str, ...] = ()
     priority: int = 200
+
 
 
 SLOT_SPECS: tuple[SlotSpec, ...] = (
@@ -144,10 +151,12 @@ SLOT_SPECS: tuple[SlotSpec, ...] = (
 )
 
 
+
 def make_memory_store(config: AppConfig):
     """Create the configured long-term memory store."""
     if not config.memory.enabled:
         return None
+
 
     if config.memory.backend == "sqlite":
         if SqliteStore is None:
@@ -155,9 +164,11 @@ def make_memory_store(config: AppConfig):
                 "SQLite long-term memory requires langgraph.store.sqlite.SqliteStore"
             )
 
+
         db_path = Path(config.sqlite.path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         memory_db_path = db_path.with_name("faust_memory.db")
+
 
         stack = ExitStack()
         store = stack.enter_context(
@@ -167,7 +178,9 @@ def make_memory_store(config: AppConfig):
         _GRAPH_RESOURCES.append(stack)
         return store
 
+
     return InMemoryStore()
+
 
 
 def _memory_namespace(state: FaustState) -> tuple[str, str]:
@@ -177,8 +190,10 @@ def _memory_namespace(state: FaustState) -> tuple[str, str]:
     return (config.memory.namespace, user_id)
 
 
+
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
+
 
 
 def _memory_record_from_item(item) -> MemoryRecord | None:
@@ -197,6 +212,7 @@ def _memory_record_from_item(item) -> MemoryRecord | None:
         return None
 
 
+
 def _strip_correction_prefixes(text: str) -> str:
     """Remove lightweight correction words from an extracted value."""
     value = text.strip().rstrip(".")
@@ -209,44 +225,55 @@ def _strip_correction_prefixes(text: str) -> str:
     return value.strip()
 
 
+
 def _normalize_memory_text(memory_text: str) -> tuple[str, str]:
     """Normalize first-person user facts into stable third-person memory text."""
     text = memory_text.strip().rstrip(".")
     lowered = text.lower()
 
+
     if lowered.startswith("my favorite "):
         remainder = text[3:].strip()
         return (f"The user's {remainder}.", "preference")
+
 
     if lowered.startswith("i prefer "):
         preference = text[9:].strip()
         return (f"The user prefers {preference}.", "preference")
 
+
     if lowered.startswith("my name is "):
         name = text[11:].strip()
         return (f"The user's name is {name}.", "profile")
+
 
     if lowered.startswith("i am "):
         name = text[5:].strip()
         return (f"The user's name is {name}.", "profile")
 
+
     if lowered.startswith("i was born on "):
         birthdate = text[14:].strip()
         return (f"The user's birthdate is {birthdate}.", "profile")
+
 
     if lowered.startswith("my birthdate is "):
         birthdate = text[16:].strip()
         return (f"The user's birthdate is {birthdate}.", "profile")
 
+
     if lowered.startswith("my birthday is "):
         birthdate = text[15:].strip()
         return (f"The user's birthdate is {birthdate}.", "profile")
 
+
     return (f"The user said: {text}.", "fact")
+
 
 
 def _slot_specs() -> tuple[SlotSpec, ...]:
     return SLOT_SPECS
+
 
 
 def _find_slot_spec(slot: str) -> SlotSpec | None:
@@ -254,6 +281,7 @@ def _find_slot_spec(slot: str) -> SlotSpec | None:
         if spec.slot == slot:
             return spec
     return None
+
 
 
 def _extract_slot_value(spec: SlotSpec, original: str, normalized: str) -> str | None:
@@ -265,6 +293,7 @@ def _extract_slot_value(spec: SlotSpec, original: str, normalized: str) -> str |
     ).strip()
     cleaned_normalized = _normalize_text(cleaned_original)
 
+
     for pattern, required_prefix in spec.write_patterns:
         match = re.match(pattern, cleaned_original, flags=re.IGNORECASE)
         if not match:
@@ -272,30 +301,38 @@ def _extract_slot_value(spec: SlotSpec, original: str, normalized: str) -> str |
         if required_prefix and not cleaned_normalized.startswith(required_prefix):
             continue
 
+
         candidate = _strip_correction_prefixes(match.group(1))
+
 
         if spec.slot == "preference.favorite_editor" and "editor" not in cleaned_normalized:
             if pattern.startswith(r"i prefer"):
                 continue
 
+
         if spec.slot == "preference.favorite_shell" and "shell" not in cleaned_normalized:
             if pattern.startswith(r"i prefer"):
                 continue
 
+
         return candidate
     return None
+
 
 
 def _detect_slot(memory_text: str) -> tuple[str | None, str]:
     normalized = _normalize_text(memory_text)
     original = memory_text.strip().rstrip(".")
 
+
     for spec in _slot_specs():
         value = _extract_slot_value(spec, original, normalized)
         if value:
             return spec.slot, value
 
+
     return None, original
+
 
 
 def _query_keywords(query: str) -> set[str]:
@@ -326,40 +363,50 @@ def _query_keywords(query: str) -> set[str]:
     return {word for word in words if word not in stopwords}
 
 
+
 def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
     normalized_query = _normalize_text(query)
     normalized_text = _normalize_text(memory.text)
     query_terms = _query_keywords(query)
     text_terms = set(re.findall(r"[a-z0-9]+", normalized_text))
 
+
     score = 0
+
 
     if normalized_query and normalized_query in normalized_text:
         score += 100
 
+
     spec = _find_slot_spec(memory.slot) if memory.slot else None
     if spec and any(phrase in normalized_query for phrase in spec.recall_phrases):
         score += spec.priority
+
 
     if spec:
         for phrase in spec.score_phrases:
             if phrase in normalized_query and phrase in normalized_text:
                 score += 80
 
+
     if "favorite" in normalized_query and "favorite" in normalized_text:
         score += 40
+
 
     overlap = len(query_terms & text_terms)
     score += overlap * 10
 
+
     timestamp = memory.updated_at.timestamp() if memory.updated_at else 0.0
     return score, timestamp
+
 
 
 def _dedupe_memories(memories: list[MemoryRecord]) -> list[MemoryRecord]:
     seen_slots: set[str] = set()
     seen_texts: set[str] = set()
     deduped: list[MemoryRecord] = []
+
 
     for memory in sorted(
         memories,
@@ -373,27 +420,73 @@ def _dedupe_memories(memories: list[MemoryRecord]) -> list[MemoryRecord]:
             deduped.append(memory)
             continue
 
+
         text_key = _normalize_text(memory.text)
         if text_key in seen_texts:
             continue
         seen_texts.add(text_key)
         deduped.append(memory)
 
+
     return deduped
 
 
+
+def _filter_relevant_memories(
+    query: str,
+    memories: list[MemoryRecord],
+    *,
+    max_results: int,
+) -> list[MemoryRecord]:
+    """Return only the most relevant memories for the current turn."""
+    if not memories:
+        return []
+
+
+    if not query.strip():
+        return memories[:max_results]
+
+
+    scored = [
+        (_score_memory(query, memory), memory)
+        for memory in memories
+    ]
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+
+    relevant: list[MemoryRecord] = []
+    for (score, _timestamp), memory in scored:
+        if score <= 0:
+            continue
+        relevant.append(memory)
+        if len(relevant) >= max_results:
+            break
+
+
+    return relevant
+
+
+
 def retrieve_memories(state: FaustState, *, store) -> dict:
-    """Load durable memories for the current user, preferring exact slot lookups."""
+    """Load durable memories for the current user and attach relevant hits."""
     config = state["config"]
 
+
     if not config.memory.enabled or store is None:
-        return {"recalled_memories": []}
+        return {
+            "memory_query": state.get("user_input", "").strip(),
+            "memory_hits": [],
+            "recalled_memories": [],
+        }
+
 
     namespace = _memory_namespace(state)
     query = state.get("user_input", "").strip()
     candidates: list[MemoryRecord] = []
 
+
     slot_keys = tuple(spec.slot for spec in _slot_specs())
+
 
     try:
         for key in slot_keys:
@@ -403,35 +496,46 @@ def retrieve_memories(state: FaustState, *, store) -> dict:
                 if memory:
                     candidates.append(memory)
 
+
         search_limit = max(config.memory.max_results, 10)
         for item in store.search(namespace, limit=search_limit):
             memory = _memory_record_from_item(item)
             if memory:
                 candidates.append(memory)
 
+
     except Exception:
-        return {"recalled_memories": []}
+        return {
+            "memory_query": query,
+            "memory_hits": [],
+            "recalled_memories": [],
+        }
+
 
     deduped = _dedupe_memories(candidates)
-
-    if not query:
-        return {"recalled_memories": deduped[: config.memory.max_results]}
-
-    ranked = sorted(
+    relevant = _filter_relevant_memories(
+        query,
         deduped,
-        key=lambda memory: _score_memory(query, memory),
-        reverse=True,
+        max_results=config.memory.max_results,
     )
 
-    return {"recalled_memories": ranked[: config.memory.max_results]}
+
+    return {
+        "memory_query": query,
+        "memory_hits": relevant,
+        "recalled_memories": relevant,
+    }
+
 
 
 def classify_task(state: FaustState) -> dict:
     """Classify the turn into a narrow task type before role routing."""
     query = _normalize_text(state.get("user_input", ""))
 
+
     if not query:
         return {"task_type": "general"}
+
 
     coding_markers = (
         "write code",
@@ -447,6 +551,7 @@ def classify_task(state: FaustState) -> dict:
     if any(marker in query for marker in coding_markers):
         return {"task_type": "coding"}
 
+
     reasoning_markers = (
         "plan this",
         "make a plan",
@@ -459,10 +564,13 @@ def classify_task(state: FaustState) -> dict:
     if any(marker in query for marker in reasoning_markers):
         return {"task_type": "reasoning"}
 
+
     if _is_memory_write(query) or _detect_recall_slot(query):
         return {"task_type": "memory"}
 
+
     return {"task_type": "general"}
+
 
 
 def route_memory(state: FaustState) -> dict:
@@ -470,12 +578,14 @@ def route_memory(state: FaustState) -> dict:
     query = state.get("user_input", "")
     recalled = state.get("recalled_memories", [])
 
+
     if _is_memory_write(query):
         return {
             "memory_route": "memory_write",
             "requested_role": None,
             "execution_notes": "Detected durable memory write.",
         }
+
 
     slot = _detect_recall_slot(query)
     if slot and _has_recalled_slot(recalled, slot):
@@ -485,15 +595,18 @@ def route_memory(state: FaustState) -> dict:
             "execution_notes": "Detected deterministic memory recall.",
         }
 
+
     return {
         "memory_route": "role_router",
         "execution_notes": "No deterministic memory path selected.",
     }
 
 
+
 def should_route_after_memory(state: FaustState) -> str:
     """Route memory writes and deterministic recall queries before role dispatch."""
     route = state.get("memory_route")
+
 
     if route == "memory_write":
         return "save_memory"
@@ -502,10 +615,12 @@ def should_route_after_memory(state: FaustState) -> str:
     return "role_router"
 
 
+
 def determine_role(state: FaustState) -> dict:
     """Pick a minimal model role from the normalized task type."""
     requested_role = state.get("requested_role")
     task_type = state.get("task_type")
+
 
     if requested_role in {"assistant", "reasoner", "coder"}:
         role = requested_role
@@ -516,21 +631,25 @@ def determine_role(state: FaustState) -> dict:
     else:
         role = "assistant"
 
+
     return {
         "requested_role": role,
         "execution_notes": f"Selected role '{role}' for task type '{task_type}'.",
     }
 
 
+
 def route_role(state: FaustState) -> str:
     """Return the graph node name for the selected role."""
     role = state.get("requested_role")
+
 
     if role == "coder":
         return "coder"
     if role == "reasoner":
         return "reasoner"
     return "assistant"
+
 
 
 def build_prompt(state: FaustState) -> dict:
@@ -541,14 +660,17 @@ def build_prompt(state: FaustState) -> dict:
     requested_role = state.get("requested_role")
     task_type = state.get("task_type")
 
+
     system_parts: list[str] = []
     if config:
         system_parts.append(config.system_prompt)
+
 
     if requested_role:
         system_parts.append(
             f"Active role: {requested_role}. Task type: {task_type or 'general'}."
         )
+
 
     if requested_role == "reasoner":
         system_parts.append(
@@ -558,6 +680,7 @@ def build_prompt(state: FaustState) -> dict:
         system_parts.append(
             "Focus on implementation details, code changes, and relevant tests."
         )
+
 
     if recalled:
         memory_lines = [
@@ -571,16 +694,20 @@ def build_prompt(state: FaustState) -> dict:
                 + "\n".join(memory_lines)
             )
 
+
     if system_parts:
         system_text = "\n\n".join(system_parts)
         system_msg = Message(role=Role.SYSTEM, content=system_text)
+
 
         if current and current[0].role == Role.SYSTEM:
             current[0] = system_msg
         else:
             current = [system_msg] + current
 
+
     return {"messages": current}
+
 
 
 def _extract_memory_candidate(query: str) -> tuple[str | None, str | None]:
@@ -588,6 +715,7 @@ def _extract_memory_candidate(query: str) -> tuple[str | None, str | None]:
     normalized_query = _normalize_text(query)
     if not normalized_query:
         return None, None
+
 
     explicit_prefixes = (
         "remember that ",
@@ -602,16 +730,20 @@ def _extract_memory_candidate(query: str) -> tuple[str | None, str | None]:
                 return slot, value
             return None, raw
 
+
     slot, value = _detect_slot(query)
     if slot:
         return slot, value
 
+
     return None, None
+
 
 
 def _is_memory_write(query: str) -> bool:
     slot, value = _extract_memory_candidate(query)
     return bool(slot and value)
+
 
 
 def _detect_recall_slot(query: str) -> str | None:
@@ -620,15 +752,19 @@ def _detect_recall_slot(query: str) -> str | None:
     if not q:
         return None
 
+
     for spec in _slot_specs():
         if any(phrase in q for phrase in spec.recall_phrases):
             return spec.slot
 
+
     return None
+
 
 
 def _has_recalled_slot(recalled: list[MemoryRecord], slot: str) -> bool:
     return any(memory.slot == slot for memory in recalled)
+
 
 
 def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | None:
@@ -637,14 +773,17 @@ def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | No
     if not slot or not recalled:
         return None
 
+
     best_by_slot = {memory.slot: memory for memory in recalled if memory.slot}
     memory = best_by_slot.get(slot)
     if memory is None:
         return None
 
+
     spec = _find_slot_spec(slot)
     if spec is None:
         return None
+
 
     prefix = spec.stored_text_template.format(value="").rstrip(".")
     text = memory.text.strip()
@@ -652,7 +791,9 @@ def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | No
     if value.startswith("is "):
         value = value[3:].strip()
 
+
     return spec.response_template.format(value=value)
+
 
 
 def memory_answer_node(state: FaustState) -> dict:
@@ -660,6 +801,7 @@ def memory_answer_node(state: FaustState) -> dict:
     query = state.get("user_input", "")
     recalled = state.get("recalled_memories", [])
     answer = _extract_recall_answer(query, recalled)
+
 
     if answer:
         return {
@@ -672,7 +814,9 @@ def memory_answer_node(state: FaustState) -> dict:
             "requested_tests": [],
         }
 
+
     return {}
+
 
 
 def _extract_requested_tests(query: str) -> list[str]:
@@ -689,10 +833,12 @@ def _extract_requested_tests(query: str) -> list[str]:
     return deduped
 
 
+
 def assistant_node(state: FaustState, adapter) -> dict:
     """General conversation role."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
+
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -716,10 +862,12 @@ def assistant_node(state: FaustState, adapter) -> dict:
         }
 
 
+
 def reasoner_node(state: FaustState, adapter) -> dict:
     """Planning and decomposition role."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
+
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -744,10 +892,12 @@ def reasoner_node(state: FaustState, adapter) -> dict:
         }
 
 
+
 def coder_node(state: FaustState, adapter) -> dict:
     """Code-focused implementation role."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
+
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -772,20 +922,25 @@ def coder_node(state: FaustState, adapter) -> dict:
         }
 
 
+
 def should_run_requested_tests(state: FaustState) -> str:
     """Only send coding flows with explicit scoped tests into the test node."""
     if state.get("active_agent") != "coder":
         return "save_memory"
 
+
     requested_tests = state.get("requested_tests", [])
     if requested_tests:
         return "run_requested_tests"
 
+
     return "save_memory"
+
 
 
 def run_requested_tests(state: FaustState) -> dict:
     """Run scoped pytest targets requested by the coding workflow.
+
 
     Safety rules:
     - Only explicit pytest node IDs under tests/ are allowed.
@@ -799,28 +954,35 @@ def run_requested_tests(state: FaustState) -> dict:
             "requested_tests": requested_tests,
         }
 
+
     valid_targets: list[str] = []
     rejected_targets: list[str] = []
+
 
     for target in requested_tests:
         cleaned = target.strip()
         if not cleaned:
             continue
 
+
         if not cleaned.startswith("tests/"):
             rejected_targets.append(cleaned)
             continue
 
+
         if any(token in cleaned for token in (";", "&&", "||", "|", "`", "$(", "..\\")):
             rejected_targets.append(cleaned)
             continue
+
 
         test_file = cleaned.split("::", 1)[0]
         if not Path(test_file).exists():
             rejected_targets.append(cleaned)
             continue
 
+
         valid_targets.append(cleaned)
+
 
     if not valid_targets:
         notes = ["Scoped test execution skipped: no valid pytest targets."]
@@ -831,7 +993,9 @@ def run_requested_tests(state: FaustState) -> dict:
             "requested_tests": requested_tests,
         }
 
+
     command = ["pytest", *valid_targets, "-q"]
+
 
     try:
         completed = subprocess.run(
@@ -844,52 +1008,65 @@ def run_requested_tests(state: FaustState) -> dict:
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
 
+
         note_parts = [
             f"Ran scoped tests: {', '.join(valid_targets)}.",
             f"Exit code: {completed.returncode}.",
         ]
 
+
         if rejected_targets:
             note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
+
 
         if stdout:
             note_parts.append("pytest stdout:\n" + stdout)
 
+
         if stderr:
             note_parts.append("pytest stderr:\n" + stderr)
+
 
         if completed.returncode == 0:
             note_parts.append("Scoped pytest run passed.")
         else:
             note_parts.append("Scoped pytest run failed.")
 
+
         return {
             "execution_notes": "\n\n".join(note_parts),
             "requested_tests": requested_tests,
         }
 
+
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+
 
         note_parts = [
             f"Scoped pytest run timed out after 60 seconds for: {', '.join(valid_targets)}."
         ]
 
+
         if rejected_targets:
             note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
+
 
         if stdout.strip():
             note_parts.append("pytest stdout before timeout:\n" + stdout.strip())
 
+
         if stderr.strip():
             note_parts.append("pytest stderr before timeout:\n" + stderr.strip())
+
 
         return {
             "execution_notes": "\n\n".join(note_parts),
             "requested_tests": requested_tests,
             "error": "Scoped pytest execution timed out.",
         }
+
 
     except Exception as exc:
         note_parts = [
@@ -899,6 +1076,7 @@ def run_requested_tests(state: FaustState) -> dict:
         if rejected_targets:
             note_parts.append("Rejected targets: " + ", ".join(rejected_targets) + ".")
 
+
         return {
             "execution_notes": "\n\n".join(note_parts),
             "requested_tests": requested_tests,
@@ -906,21 +1084,26 @@ def run_requested_tests(state: FaustState) -> dict:
         }
 
 
+
 def save_memory(state: FaustState, *, store) -> dict:
     """Persist explicit or implicit durable memory requests."""
     config = state["config"]
     user_input = state.get("user_input", "").strip()
 
+
     if not config.memory.enabled or store is None or not user_input:
         return {}
+
 
     slot, extracted_value = _extract_memory_candidate(user_input)
     if slot is None or not extracted_value:
         return {}
 
+
     namespace = _memory_namespace(state)
     now = datetime.now(timezone.utc)
     spec = _find_slot_spec(slot) if slot else None
+
 
     if spec is not None:
         stored_text = spec.stored_text_template.format(value=extracted_value)
@@ -932,6 +1115,7 @@ def save_memory(state: FaustState, *, store) -> dict:
         key = str(uuid4())
         category = normalized_category
 
+
     record = MemoryRecord(
         key=key,
         slot=slot,
@@ -942,10 +1126,12 @@ def save_memory(state: FaustState, *, store) -> dict:
         updated_at=now,
     )
 
+
     try:
         store.put(namespace, key, record.model_dump(mode="json"))
     except Exception:
         return {}
+
 
     recalled = [
         m
@@ -955,13 +1141,17 @@ def save_memory(state: FaustState, *, store) -> dict:
     recalled.append(record)
     recalled = _dedupe_memories(recalled)
 
+
     if spec is not None:
         response = spec.confirm_template.format(value=extracted_value)
     else:
         response = "Okay — I'll remember that."
 
+
     return {
         "recalled_memories": recalled,
+        "memory_hits": recalled,
+        "memory_query": user_input,
         "response": response,
         "error": None,
         "intent": "memory_write",
@@ -970,6 +1160,7 @@ def save_memory(state: FaustState, *, store) -> dict:
         "execution_notes": "Persisted durable memory record.",
         "requested_tests": [],
     }
+
 
 
 def make_checkpointer(config: AppConfig):
@@ -988,18 +1179,22 @@ def make_checkpointer(config: AppConfig):
         allowed_msgpack_modules=allowed_msgpack_modules,
     )
 
+
     if config.checkpointer_backend == "sqlite":
         db_path = Path(config.sqlite.path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return SqliteSaver.from_conn_string(str(db_path), serde=serde)
 
+
     return InMemorySaver(serde=serde)
+
 
 
 def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
     """Build and compile the LangGraph state graph."""
     workflow = StateGraph(FaustState)
     store = make_memory_store(config)
+
 
     workflow.add_node(
         "retrieve_memories",
@@ -1015,6 +1210,7 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
     workflow.add_node("coder", partial(coder_node, adapter=adapter))
     workflow.add_node("run_requested_tests", run_requested_tests)
     workflow.add_node("save_memory", partial(save_memory, store=store))
+
 
     workflow.set_entry_point("retrieve_memories")
     workflow.add_edge("retrieve_memories", "classify_task")
@@ -1052,8 +1248,8 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
     workflow.add_edge("run_requested_tests", "save_memory")
     workflow.add_edge("save_memory", END)
 
+
     checkpointer = make_checkpointer(config)
 
+
     return workflow.compile(checkpointer=checkpointer, store=store)
-
-

@@ -45,7 +45,7 @@ def make_state(
     user_input: str = "Hello",
     user_id: str = "test-user",
     config: AppConfig | None = None,
-):
+    ):
     """Minimal valid FaustState payload for graph tests."""
     config = config or AppConfig()
     session = Session(id="test-session", model=config.model)
@@ -433,6 +433,58 @@ def test_sqlite_memory_persists_across_graph_instances(tmp_path):
 
     # Step 6: Verify deterministic memory answer instead of LLM fallback
     assert result["response"] == "Your favorite editor is Neovim."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"
+
+
+def test_graph_recall_populates_memory_hits_in_state():
+    """Graph recall should retain memory_hits in final state for deterministic recall."""
+    adapter = FakeAdapter(chunks=["This should not be used"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    remember_state = make_state(
+        user_input="remember that my favorite editor is Vim",
+        user_id="javier",
+        config=config,
+    )
+    graph.invoke(
+        remember_state,
+        config={
+            "configurable": {
+                "thread_id": "thread-memory-hits-1",
+                "user_id": "javier",
+            }
+        },
+    )
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="What is my favorite editor?")],
+        user_input="What is my favorite editor?",
+        user_id="javier",
+        config=config,
+    )
+    result = graph.invoke(
+        recall_state,
+        config={
+            "configurable": {
+                "thread_id": "thread-memory-hits-2",
+                "user_id": "javier",
+            }
+        },
+    )
+
+    assert "memory_hits" in result
+    assert isinstance(result["memory_hits"], list)
+    assert len(result["memory_hits"]) >= 1
+    assert result["recalled_memories"] == result["memory_hits"]
+    assert any(
+        memory.slot == "preference.favorite_editor"
+        and memory.text == "The user's favorite editor is Vim."
+        for memory in result["memory_hits"]
+    )
+    assert result["memory_query"] == "What is my favorite editor?"
+    assert result["response"] == "Your favorite editor is Vim."
     assert result["intent"] == "memory_recall"
     assert result["active_agent"] == "memory_answer"
 
@@ -1285,3 +1337,93 @@ def test_location_correction_actually():
     assert updated.value["text"] == "The user's location is Los Angeles."
 
     
+def test_retrieve_memories_sets_memory_hits_and_query():
+    """retrieve_memories should populate memory_query and memory_hits for this turn."""
+    store = InMemoryStore()
+    config = AppConfig()
+    namespace = ("memories", "javier")
+    now = datetime.now(timezone.utc)
+
+    # Seed store with one relevant memory.
+    store.put(
+        namespace,
+        "mem-1",
+        {
+            "key": "mem-1",
+            "text": "The user's favorite editor is Vim.",
+            "slot": "preference.favorite_editor",
+            "category": "preference",
+            "source": "explicit",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+        config=config,
+    )
+
+    result = retrieve_memories(state, store=store)
+
+    # memory_query and memory_hits should reflect this turn's retrieval.
+    assert result["memory_query"] == "What is my favorite editor?"
+    hits = result["memory_hits"]
+    assert isinstance(hits, list)
+    assert len(hits) == 1
+    assert hits[0].text == "The user's favorite editor is Vim."
+    # recalled_memories remains the prompt-facing projection.
+    assert result["recalled_memories"] == hits
+
+
+def test_retrieve_memories_filters_irrelevant_facts():
+    """retrieve_memories should filter out low-score memories for a specific query."""
+    store = InMemoryStore()
+    config = AppConfig(memory=AppConfig().memory)
+    config.memory.max_results = 1
+    namespace = ("memories", "javier")
+    now = datetime.now(timezone.utc)
+
+    # One relevant memory and one unrelated fact.
+    store.put(
+        namespace,
+        "mem-editor",
+        {
+            "key": "mem-editor",
+            "text": "The user's favorite editor is Vim.",
+            "slot": "preference.favorite_editor",
+            "category": "preference",
+            "source": "explicit",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    store.put(
+        namespace,
+        "mem-random",
+        {
+            "key": "mem-random",
+            "text": "The user said: I like ice cream.",
+            "slot": None,
+            "category": "fact",
+            "source": "explicit",
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+    state = make_state(
+        user_input="What is my favorite editor?",
+        user_id="javier",
+        config=config,
+    )
+
+    result = retrieve_memories(state, store=store)
+    hits = result["memory_hits"]
+
+    # With max_results=1 and a specific editor query, only the editor memory should remain.
+    assert len(hits) == 1
+    assert hits[0].text == "The user's favorite editor is Vim."
+
+

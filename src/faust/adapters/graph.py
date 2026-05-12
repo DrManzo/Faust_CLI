@@ -796,6 +796,7 @@ def run_requested_tests(state: FaustState) -> dict:
     if not requested_tests:
         return {
             "execution_notes": "No scoped tests requested.",
+            "requested_tests": requested_tests,
         }
 
     valid_targets: list[str] = []
@@ -827,6 +828,7 @@ def run_requested_tests(state: FaustState) -> dict:
             notes.append("Rejected targets: " + ", ".join(rejected_targets))
         return {
             "execution_notes": " ".join(notes),
+            "requested_tests": requested_tests,
         }
 
     command = ["pytest", *valid_targets, "-q"]
@@ -863,6 +865,7 @@ def run_requested_tests(state: FaustState) -> dict:
 
         return {
             "execution_notes": "\n\n".join(note_parts),
+            "requested_tests": requested_tests,
         }
 
     except subprocess.TimeoutExpired as exc:
@@ -884,6 +887,7 @@ def run_requested_tests(state: FaustState) -> dict:
 
         return {
             "execution_notes": "\n\n".join(note_parts),
+            "requested_tests": requested_tests,
             "error": "Scoped pytest execution timed out.",
         }
 
@@ -897,6 +901,7 @@ def run_requested_tests(state: FaustState) -> dict:
 
         return {
             "execution_notes": "\n\n".join(note_parts),
+            "requested_tests": requested_tests,
             "error": str(exc),
         }
 
@@ -980,7 +985,7 @@ def make_checkpointer(config: AppConfig):
     # allowed_objects. Revisit on library upgrade to address the pending deprecation
     # warning about the default allowed_objects value.
     serde = JsonPlusSerializer(
-    allowed_msgpack_modules=allowed_msgpack_modules
+        allowed_msgpack_modules=allowed_msgpack_modules,
     )
 
     if config.checkpointer_backend == "sqlite":

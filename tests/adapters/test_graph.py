@@ -1119,3 +1119,169 @@ def test_run_requested_tests_handles_unexpected_exception(monkeypatch):
     assert result["error"] == "subprocess exploded"
     assert "failed unexpectedly" in result["execution_notes"]
     assert "subprocess exploded" in result["execution_notes"]
+
+    # ========== Step 7: Favorite Shell Slot Tests ==========
+
+
+def test_detect_recall_slot_favorite_shell_variants():
+    """_detect_recall_slot should recognize favorite shell phrasings."""
+    assert (
+        _detect_recall_slot("What is my favorite shell?")
+        == "preference.favorite_shell"
+    )
+    assert (
+        _detect_recall_slot("which shell do i prefer")
+        == "preference.favorite_shell"
+    )
+    assert (
+        _detect_recall_slot("what shell do i use")
+        == "preference.favorite_shell"
+    )
+    assert (
+        _detect_recall_slot("what's my preferred shell")
+        == "preference.favorite_shell"
+    )
+
+
+def test_save_memory_accepts_implicit_favorite_shell_statement():
+    """save_memory should persist a natural favorite shell statement."""
+    store = InMemoryStore()
+    state = make_state(
+        user_input="my favorite shell is zsh",
+        user_id="javier",
+    )
+
+    result = save_memory(state, store=store)
+
+    assert len(result["recalled_memories"]) == 1
+    memory = result["recalled_memories"][0]
+    assert memory.slot == "preference.favorite_shell"
+    assert memory.text == "The user's favorite shell is zsh."
+    assert result["response"] == "Okay — I'll remember that your favorite shell is zsh."
+
+
+def test_route_memory_returns_memory_write_for_implicit_shell_statement():
+    """route_memory should classify favorite shell self-facts as memory writes."""
+    state = make_state(user_input="my favorite shell is zsh")
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "memory_write"
+
+
+def test_memory_answer_node_returns_shell_answer():
+    """memory_answer_node should answer favorite shell recall deterministically."""
+    now = datetime.now(timezone.utc)
+    recalled = [
+        MemoryRecord(
+            key="preference.favorite_shell",
+            slot="preference.favorite_shell",
+            text="The user's favorite shell is zsh.",
+            category="preference",
+            source="explicit",
+            created_at=now,
+            updated_at=now,
+        )
+    ]
+    state = make_state(
+        user_input="What is my favorite shell?",
+        user_id="javier",
+    )
+    state["recalled_memories"] = recalled
+
+    result = memory_answer_node(state)
+
+    assert result["response"] == "Your favorite shell is zsh."
+    assert result["error"] is None
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"
+
+
+def test_save_memory_overwrites_slot_for_implicit_shell_correction():
+    """Implicit shell correction should overwrite the existing slot value."""
+    store = InMemoryStore()
+    config = AppConfig()
+
+    first_state = make_state(
+        user_input="remember that my favorite shell is bash",
+        user_id="javier",
+        config=config,
+    )
+    save_memory(first_state, store=store)
+
+    second_state = make_state(
+        user_input="my favorite shell is zsh",
+        user_id="javier",
+        config=config,
+    )
+    result = save_memory(second_state, store=store)
+
+    recalled = result["recalled_memories"]
+    shell_memories = [m for m in recalled if m.slot == "preference.favorite_shell"]
+
+    assert len(shell_memories) == 1
+    assert shell_memories[0].text == "The user's favorite shell is zsh."
+
+
+def test_graph_returns_deterministic_shell_answer_from_implicit_write():
+    """Graph should recall a shell saved from a natural self-fact statement."""
+    adapter = FakeAdapter(chunks=["This should not be used"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
+
+    remember_state = make_state(
+        user_input="my favorite shell is zsh",
+        user_id="javier",
+        config=config,
+    )
+    graph.invoke(
+        remember_state,
+        config={"configurable": {"thread_id": "thread-shell-1", "user_id": "javier"}},
+    )
+
+    recall_state = make_state(
+        messages=[Message(role=Role.USER, content="What is my favorite shell?")],
+        user_input="What is my favorite shell?",
+        user_id="javier",
+        config=config,
+    )
+    result = graph.invoke(
+        recall_state,
+        config={"configurable": {"thread_id": "thread-shell-2", "user_id": "javier"}},
+    )
+
+    assert result["response"] == "Your favorite shell is zsh."
+    assert result["intent"] == "memory_recall"
+    assert result["active_agent"] == "memory_answer"
+
+
+def test_location_correction_actually():
+    """Correction with 'actually' should overwrite location slot."""
+    store = InMemoryStore()
+    config = AppConfig()
+
+    state1 = make_state(
+        user_input="I live in San Bernardino",
+        user_id="javier",
+        config=config,
+    )
+    result1 = save_memory(state1, store=store)
+    assert "San Bernardino" in result1["response"]
+
+    stored = store.get((config.memory.namespace, "javier"), "profile.location")
+    assert stored is not None
+    assert stored.value["text"] == "The user's location is San Bernardino."
+
+    state2 = make_state(
+        user_input="Actually, I live in Los Angeles",
+        user_id="javier",
+        config=config,
+    )
+    result2 = save_memory(state2, store=store)
+    assert "Los Angeles" in result2["response"]
+
+    updated = store.get((config.memory.namespace, "javier"), "profile.location")
+    assert updated is not None
+    assert updated.value["text"] == "The user's location is Los Angeles."
+
+    

@@ -24,7 +24,124 @@ except ImportError:  # pragma: no cover
 
 from faust.core.models import AppConfig, FaustState, MemoryRecord, Message, Role
 
+from dataclasses import dataclass
+
 _GRAPH_RESOURCES: list[ExitStack] = []
+
+
+@dataclass(frozen=True)
+class SlotSpec:
+    slot: str
+    category: str
+    write_patterns: tuple[tuple[str, str | None], ...]
+    recall_phrases: tuple[str, ...]
+    stored_text_template: str
+    response_template: str
+    confirm_template: str
+    score_phrases: tuple[str, ...] = ()
+    priority: int = 200
+
+
+SLOT_SPECS: tuple[SlotSpec, ...] = (
+    SlotSpec(
+        slot="preference.favorite_editor",
+        category="preference",
+        write_patterns=(
+            (r"my favorite editor is\s+(.+)", "my favorite editor is "),
+            (r"i prefer\s+(.+)", None),
+        ),
+        recall_phrases=(
+            "favorite editor",
+            "preferred editor",
+            "what editor do i prefer",
+            "which editor do i prefer",
+            "what editor do i use",
+        ),
+        stored_text_template="The user's favorite editor is {value}.",
+        response_template="Your favorite editor is {value}.",
+        confirm_template="Okay — I'll remember that your favorite editor is {value}.",
+        score_phrases=("favorite editor", "preferred editor"),
+    ),
+    SlotSpec(
+        slot="preference.favorite_shell",
+        category="preference",
+        write_patterns=(
+            (r"my favorite shell is\s+(.+)", "my favorite shell is "),
+            (r"i prefer\s+(.+)", None),
+        ),
+        recall_phrases=(
+            "favorite shell",
+            "preferred shell",
+            "what shell do i prefer",
+            "which shell do i prefer",
+            "what shell do i use",
+        ),
+        stored_text_template="The user's favorite shell is {value}.",
+        response_template="Your favorite shell is {value}.",
+        confirm_template="Okay — I'll remember that your favorite shell is {value}.",
+        score_phrases=("favorite shell", "preferred shell"),
+    ),
+    SlotSpec(
+        slot="profile.name",
+        category="profile",
+        write_patterns=(
+            (r"my name is\s+(.+)", "my name is "),
+            (r"i am\s+(.+)", "i am "),
+        ),
+        recall_phrases=(
+            "who am i",
+            "what is my name",
+            "what's my name",
+            "do you know my name",
+        ),
+        stored_text_template="The user's name is {value}.",
+        response_template="Your name is {value}.",
+        confirm_template="Okay — I'll remember that your name is {value}.",
+        score_phrases=("my name", "who am i"),
+    ),
+    SlotSpec(
+        slot="profile.birthdate",
+        category="profile",
+        write_patterns=(
+            (r"i was born on\s+(.+)", "i was born on "),
+            (r"my birthdate is\s+(.+)", "my birthdate is "),
+            (r"my birthday is\s+(.+)", "my birthday is "),
+        ),
+        recall_phrases=(
+            "when was i born",
+            "what is my birthdate",
+            "what's my birthdate",
+            "when is my birthday",
+            "what is my birthday",
+            "what's my birthday",
+        ),
+        stored_text_template="The user's birthdate is {value}.",
+        response_template="Your birthdate is {value}.",
+        confirm_template="Okay — I'll remember that your birthdate is {value}.",
+        score_phrases=("birthdate", "birthday", "born"),
+        priority=220,
+    ),
+    SlotSpec(
+        slot="profile.location",
+        category="profile",
+        write_patterns=(
+            (r"i live in\s+(.+)", "i live in "),
+            (r"my location is\s+(.+)", "my location is "),
+            (r"i am from\s+(.+)", "i am from "),
+        ),
+        recall_phrases=(
+            "where do i live",
+            "what is my location",
+            "what's my location",
+            "where am i from",
+            "where am i located",
+        ),
+        stored_text_template="The user's location is {value}.",
+        response_template="Your location is {value}.",
+        confirm_template="Okay — I'll remember that your location is {value}.",
+        score_phrases=("location", "live", "from"),
+    ),
+)
 
 
 def make_memory_store(config: AppConfig):
@@ -128,58 +245,55 @@ def _normalize_memory_text(memory_text: str) -> tuple[str, str]:
     return (f"The user said: {text}.", "fact")
 
 
+def _slot_specs() -> tuple[SlotSpec, ...]:
+    return SLOT_SPECS
+
+
+def _find_slot_spec(slot: str) -> SlotSpec | None:
+    for spec in _slot_specs():
+        if spec.slot == slot:
+            return spec
+    return None
+
+
+def _extract_slot_value(spec: SlotSpec, original: str, normalized: str) -> str | None:
+    cleaned_original = re.sub(
+        r"^(actually|no[, ]+|nope[, ]+|it's|it is)[,\s]+",
+        "",
+        original,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned_normalized = _normalize_text(cleaned_original)
+
+    for pattern, required_prefix in spec.write_patterns:
+        match = re.match(pattern, cleaned_original, flags=re.IGNORECASE)
+        if not match:
+            continue
+        if required_prefix and not cleaned_normalized.startswith(required_prefix):
+            continue
+
+        candidate = _strip_correction_prefixes(match.group(1))
+
+        if spec.slot == "preference.favorite_editor" and "editor" not in cleaned_normalized:
+            if pattern.startswith(r"i prefer"):
+                continue
+
+        if spec.slot == "preference.favorite_shell" and "shell" not in cleaned_normalized:
+            if pattern.startswith(r"i prefer"):
+                continue
+
+        return candidate
+    return None
+
+
 def _detect_slot(memory_text: str) -> tuple[str | None, str]:
     normalized = _normalize_text(memory_text)
     original = memory_text.strip().rstrip(".")
 
-    favorite_editor = re.match(
-        r"my favorite editor is\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if favorite_editor and normalized.startswith("my favorite editor is "):
-        value = _strip_correction_prefixes(favorite_editor.group(1))
-        return "preference.favorite_editor", value
-
-    preferred_editor = re.match(
-        r"i prefer\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if preferred_editor and "editor" in normalized:
-        value = _strip_correction_prefixes(preferred_editor.group(1))
-        return "preference.favorite_editor", value
-
-    user_name = re.match(
-        r"my name is\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if user_name and normalized.startswith("my name is "):
-        value = _strip_correction_prefixes(user_name.group(1))
-        return "profile.name", value
-
-    i_am_name = re.match(
-        r"i am\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if i_am_name and normalized.startswith("i am "):
-        value = _strip_correction_prefixes(i_am_name.group(1))
-        return "profile.name", value
-
-    born_on = re.match(
-        r"i was born on\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if born_on and normalized.startswith("i was born on "):
-        value = _strip_correction_prefixes(born_on.group(1))
-        return "profile.birthdate", value
-
-    birthdate_is = re.match(
-        r"my birthdate is\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if birthdate_is and normalized.startswith("my birthdate is "):
-        value = _strip_correction_prefixes(birthdate_is.group(1))
-        return "profile.birthdate", value
-
-    birthday_is = re.match(
-        r"my birthday is\s+(.+)", original, flags=re.IGNORECASE
-    )
-    if birthday_is and normalized.startswith("my birthday is "):
-        value = _strip_correction_prefixes(birthday_is.group(1))
-        return "profile.birthdate", value
+    for spec in _slot_specs():
+        value = _extract_slot_value(spec, original, normalized)
+        if value:
+            return spec.slot, value
 
     return None, original
 
@@ -223,41 +337,14 @@ def _score_memory(query: str, memory: MemoryRecord) -> tuple[int, float]:
     if normalized_query and normalized_query in normalized_text:
         score += 100
 
-    if (
-        memory.slot == "preference.favorite_editor"
-        and "favorite editor" in normalized_query
-    ):
-        score += 200
+    spec = _find_slot_spec(memory.slot) if memory.slot else None
+    if spec and any(phrase in normalized_query for phrase in spec.recall_phrases):
+        score += spec.priority
 
-    if memory.slot == "profile.name" and (
-        "my name" in normalized_query or "who am i" in normalized_query
-    ):
-        score += 200
-
-    if memory.slot == "profile.birthdate" and (
-        "when was i born" in normalized_query
-        or "what is my birthdate" in normalized_query
-        or "what's my birthdate" in normalized_query
-        or "when is my birthday" in normalized_query
-        or "what is my birthday" in normalized_query
-        or "what's my birthday" in normalized_query
-    ):
-        score += 220
-
-    if (
-        "favorite editor" in normalized_query
-        and "favorite editor" in normalized_text
-    ):
-        score += 80
-
-    if "birthdate" in normalized_query and "birthdate" in normalized_text:
-        score += 80
-
-    if "birthday" in normalized_query and "birthdate" in normalized_text:
-        score += 80
-
-    if "born" in normalized_query and "birthdate" in normalized_text:
-        score += 80
+    if spec:
+        for phrase in spec.score_phrases:
+            if phrase in normalized_query and phrase in normalized_text:
+                score += 80
 
     if "favorite" in normalized_query and "favorite" in normalized_text:
         score += 40
@@ -306,11 +393,7 @@ def retrieve_memories(state: FaustState, *, store) -> dict:
     query = state.get("user_input", "").strip()
     candidates: list[MemoryRecord] = []
 
-    slot_keys = (
-        "preference.favorite_editor",
-        "profile.name",
-        "profile.birthdate",
-    )
+    slot_keys = tuple(spec.slot for spec in _slot_specs())
 
     try:
         for key in slot_keys:
@@ -537,41 +620,9 @@ def _detect_recall_slot(query: str) -> str | None:
     if not q:
         return None
 
-    if any(
-        phrase in q
-        for phrase in (
-            "favorite editor",
-            "preferred editor",
-            "what editor do i prefer",
-            "which editor do i prefer",
-            "what editor do i use",
-        )
-    ):
-        return "preference.favorite_editor"
-
-    if any(
-        phrase in q
-        for phrase in (
-            "who am i",
-            "what is my name",
-            "what's my name",
-            "do you know my name",
-        )
-    ):
-        return "profile.name"
-
-    if any(
-        phrase in q
-        for phrase in (
-            "when was i born",
-            "what is my birthdate",
-            "what's my birthdate",
-            "when is my birthday",
-            "what is my birthday",
-            "what's my birthday",
-        )
-    ):
-        return "profile.birthdate"
+    for spec in _slot_specs():
+        if any(phrase in q for phrase in spec.recall_phrases):
+            return spec.slot
 
     return None
 
@@ -586,28 +637,22 @@ def _extract_recall_answer(query: str, recalled: list[MemoryRecord]) -> str | No
     if not slot or not recalled:
         return None
 
-    best_by_slot = {
-        memory.slot: memory for memory in recalled if memory.slot
-    }
+    best_by_slot = {memory.slot: memory for memory in recalled if memory.slot}
     memory = best_by_slot.get(slot)
     if memory is None:
         return None
 
+    spec = _find_slot_spec(slot)
+    if spec is None:
+        return None
+
+    prefix = spec.stored_text_template.format(value="").rstrip(".")
     text = memory.text.strip()
+    value = text.removeprefix(prefix).strip().rstrip(".")
+    if value.startswith("is "):
+        value = value[3:].strip()
 
-    if slot == "preference.favorite_editor":
-        value = text.removeprefix("The user's favorite editor is ").rstrip(".")
-        return f"Your favorite editor is {value}."
-
-    if slot == "profile.name":
-        value = text.removeprefix("The user's name is ").rstrip(".")
-        return f"Your name is {value}."
-
-    if slot == "profile.birthdate":
-        value = text.removeprefix("The user's birthdate is ").rstrip(".")
-        return f"Your birthdate is {value}."
-
-    return None
+    return spec.response_template.format(value=value)
 
 
 def memory_answer_node(state: FaustState) -> dict:
@@ -870,19 +915,12 @@ def save_memory(state: FaustState, *, store) -> dict:
 
     namespace = _memory_namespace(state)
     now = datetime.now(timezone.utc)
+    spec = _find_slot_spec(slot) if slot else None
 
-    if slot == "preference.favorite_editor":
-        stored_text = f"The user's favorite editor is {extracted_value}."
+    if spec is not None:
+        stored_text = spec.stored_text_template.format(value=extracted_value)
         key = slot
-        category = "preference"
-    elif slot == "profile.name":
-        stored_text = f"The user's name is {extracted_value}."
-        key = slot
-        category = "profile"
-    elif slot == "profile.birthdate":
-        stored_text = f"The user's birthdate is {extracted_value}."
-        key = slot
-        category = "profile"
+        category = spec.category
     else:
         normalized_text, normalized_category = _normalize_memory_text(user_input)
         stored_text = normalized_text
@@ -912,12 +950,8 @@ def save_memory(state: FaustState, *, store) -> dict:
     recalled.append(record)
     recalled = _dedupe_memories(recalled)
 
-    if slot == "preference.favorite_editor":
-        response = f"Okay — I'll remember that your favorite editor is {extracted_value}."
-    elif slot == "profile.name":
-        response = f"Okay — I'll remember that your name is {extracted_value}."
-    elif slot == "profile.birthdate":
-        response = f"Okay — I'll remember that your birthdate is {extracted_value}."
+    if spec is not None:
+        response = spec.confirm_template.format(value=extracted_value)
     else:
         response = "Okay — I'll remember that."
 

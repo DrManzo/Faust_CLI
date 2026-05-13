@@ -538,15 +538,20 @@ def classify_task(state: FaustState) -> dict:
 
 
     # Step 9: test_draft must be checked before generic coding markers so that
-    # "draft a test" does not fall through into the coder execution path.
+    # test-draft prompts do not fall through into the coder execution path.
+    # Markers are ordered most-specific first.
     test_draft_markers = (
         "draft a test",
         "draft test",
         "propose a test",
+        "propose a scoped",
+        "scoped pytest",
         "write a test for",
         "write tests for",
         "suggest a test",
         "generate a test",
+        "test coverage",
+        "test plan",
     )
     if any(marker in query for marker in test_draft_markers):
         return {"task_type": "test_draft"}

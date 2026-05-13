@@ -2,31 +2,13 @@
 
 from __future__ import annotations
 
-import re
-
 import typer
 from rich.console import Console
-from typer.models import OptionInfo
 
+from faust.cli.constants import _APPROVE_RE, _EXIT_TOKENS, _resolve_option
 from faust.core.models import Message, Role, Session
 
 console = Console()
-
-# Matches explicit approval language at the start of a user turn.
-_APPROVE_RE = re.compile(
-    r"^\s*(approved?|yes[,.]?\s*(run|execute|go\s+ahead)?|APPROVE)\b",
-    re.IGNORECASE,
-)
-
-# All tokens that trigger a clean exit before a model turn is attempted.
-_EXIT_TOKENS = frozenset({"exit", "quit", "q", "/exit"})
-
-
-def _resolve_option(value, fallback: str) -> str:
-    """Convert Typer OptionInfo defaults into plain strings."""
-    if isinstance(value, OptionInfo):
-        return fallback
-    return str(value)
 
 
 def _print_debug_state(state: dict) -> None:
@@ -110,7 +92,6 @@ def chat(
         "error": None,
     }
 
-    # --- Banner: show all three active model roles ---
     models = config.models
     console.print(
         f"[bold green]Faust[/bold green] — "

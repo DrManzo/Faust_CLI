@@ -25,8 +25,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from typer.models import OptionInfo
 
+from faust.cli.constants import _APPROVE_RE, _EXIT_TOKENS, _resolve_option
 from faust.core.models import Message, Role, Session
 
 console = Console()
@@ -35,48 +35,98 @@ console = Console()
 # Safety guards
 # ---------------------------------------------------------------------------
 
-# Approval vocabulary — matches the same pattern as chat.py _APPROVE_RE.
-_APPROVE_RE = re.compile(
-    r"^\s*(approved?|yes[,.]?\s*(run|execute|go\s+ahead)?|APPROVE)\b",
-    re.IGNORECASE,
-)
-
-# Exit tokens — same set as chat.py _EXIT_TOKENS.
-_EXIT_TOKENS = frozenset({"exit", "quit", "q", "/exit"})
-
-# Only allow paths that start with ``tests/`` and optionally end in ``.py``.
-# Rejects absolute paths, ``..`` traversal, and anything outside tests/.
-# Fixed: was `(?\.py)` (invalid) — corrected to `(?:\.py)` (non-capturing group).
+# Valid pytest node-id forms accepted by _is_safe_target:
+#   tests/path/file.py
+#   tests/path/file.py::test_function_name
+#   tests/path/file.py::TestClass::test_method
+#   tests/path/             (directory sweep)
+# Rejects absolute paths, ../traversal, shell metacharacters.
 _SAFE_TARGET_RE = re.compile(
-    r"^tests/[a-zA-Z0-9_/\-]+(?:\.py)?$"
+    r"^tests/[a-zA-Z0-9_/\-]+(?:\.py(?:::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)?)?)?/?$"
 )
 
 
 def _is_safe_target(target: str) -> bool:
-    """Return True only if *target* is a safe, scoped pytest path."""
+    """Return True only if *target* is a safe, scoped pytest path.
+
+    Accepts:
+      - tests/path/file.py
+      - tests/path/file.py::test_function_name
+      - tests/path/file.py::TestClass::test_method
+      - tests/path/  (directory sweep)
+
+    Rejects:
+      - Absolute paths
+      - ../traversal
+      - Shell metacharacters (; & | ` $ < > ! \\)
+      - Anything not rooted at tests/
+    """
     t = target.strip()
     if not t:
         return False
-    # Must start with tests/ and must not contain shell metacharacters.
     if not t.startswith("tests/"):
         return False
     if re.search(r"[;&|`$<>\\!]", t):
         return False
-    # Must resolve within the project root (no ../ traversal).
     try:
-        resolved = Path(t).resolve()
+        # Resolve only the file portion (before any ::) to block traversal.
+        file_part = t.split("::")[0]
+        resolved = Path(file_part).resolve()
         cwd = Path.cwd().resolve()
         resolved.relative_to(cwd)
     except ValueError:
         return False
-    return True
+    return bool(_SAFE_TARGET_RE.match(t))
 
 
-def _resolve_option(value, fallback: str) -> str:
-    """Convert Typer OptionInfo defaults into plain strings."""
-    if isinstance(value, OptionInfo):
-        return fallback
-    return str(value)
+# ---------------------------------------------------------------------------
+# Node-id normalisation
+# ---------------------------------------------------------------------------
+
+# Extracts the first plausible pytest node-id from free-form model text.
+# Matches patterns like:
+#   tests/cli/test_foo.py::test_bar
+#   tests/cli/test_foo.py
+_NODE_ID_RE = re.compile(
+    r"(tests/[a-zA-Z0-9_/\-]+\.py(?:::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)?)?)"
+)
+
+
+def _extract_node_ids(raw: list[str]) -> list[str]:
+    """Extract valid pytest node-ids from a list of raw model-generated strings.
+
+    For each entry:
+    - If it is already a safe target, keep it as-is.
+    - Otherwise try to extract an embedded node-id via regex scan.
+    - If nothing valid is found, the entry is dropped and a warning is
+      printed so the operator can see what was rejected and why.
+
+    This means that even when the model returns sloppy text like
+    ``test_exit_behavior::test_chat_exit_after_valid_turn`` the function
+    will reject it and report clearly rather than passing it to pytest
+    and producing a confusing 'not found' error.
+    """
+    result: list[str] = []
+    for raw_target in raw:
+        t = raw_target.strip()
+        if _is_safe_target(t):
+            result.append(t)
+            continue
+        # Try to pull a valid node-id out of the text.
+        m = _NODE_ID_RE.search(t)
+        if m and _is_safe_target(m.group(1)):
+            console.print(
+                f"  [yellow]⚠[/yellow]  Extracted node-id from sloppy target: "
+                f"[cyan]{m.group(1)}[/cyan]  [dim](original: {t!r})[/dim]"
+            )
+            result.append(m.group(1))
+        else:
+            console.print(
+                f"  [red]✗[/red]  Rejected malformed target: [dim]{t!r}[/dim]\n"
+                f"     [dim]Expected: tests/<path>.py[::test_name]  "
+                f"Got: {t!r}[/dim]"
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +160,18 @@ def _run_tests(targets: list[str]) -> tuple[int, str, Path]:
 # ---------------------------------------------------------------------------
 
 def _display_proposal(proposal: dict) -> None:
-    """Pretty-print a code or test proposal for human review."""
+    """Pretty-print a code or test proposal for human review.
+
+    Normalises test_targets through _extract_node_ids() so that malformed
+    model output is caught and reported BEFORE the operator sees the
+    approval prompt — not after pytest fails with 'not found'.
+    """
     description = proposal.get("description", "(no description)")
     code_diff = proposal.get("code_diff", "")
-    test_targets = proposal.get("test_targets", [])
+    raw_targets = proposal.get("test_targets") or []
+
+    # Normalise targets: extract valid node-ids, report bad ones.
+    safe_targets = _extract_node_ids(raw_targets)
 
     console.print()
     console.print(
@@ -133,21 +191,27 @@ def _display_proposal(proposal: dict) -> None:
             )
         )
 
-    if test_targets:
-        safe = [t for t in test_targets if _is_safe_target(t)]
-        unsafe = [t for t in test_targets if not _is_safe_target(t)]
+    if safe_targets:
         console.print(f"\n[bold]Test targets (approved scope):[/bold]")
-        for t in safe:
+        for t in safe_targets:
             console.print(f"  [green]✓[/green] {t}")
-        for t in unsafe:
-            console.print(
-                f"  [red]✗[/red] {t}  [dim](rejected — outside tests/ scope)[/dim]"
-            )
+    elif raw_targets:
+        console.print(
+            "\n[yellow]No safe targets remain after normalisation. "
+            "Nothing will run on approval.[/yellow]"
+        )
+    else:
+        console.print(
+            "\n[dim]No test targets in this proposal.[/dim]"
+        )
+
+    # Store the normalised targets back so the approval branch runs them.
+    proposal["test_targets"] = safe_targets
 
     console.print()
     console.print(
-        "[yellow]Type [bold]approve[/bold] / [bold]yes[/bold] to run the "
-        "approved test targets, or any other input to skip.[/yellow]"
+        "[yellow]Type [bold]approve[/bold] / [bold]yes[/bold] / [bold]confirm[/bold] "
+        "to run the approved test targets, or any other input to skip.[/yellow]"
     )
     console.print()
 
@@ -156,7 +220,13 @@ def _display_proposal(proposal: dict) -> None:
 # Graph interaction helpers
 # ---------------------------------------------------------------------------
 
-def _ask_faust(graph, state: dict, user_input: str, thread_id: str, user_id: str) -> dict:
+def _ask_faust(
+    graph,
+    state: dict,
+    user_input: str,
+    thread_id: str,
+    user_id: str,
+) -> dict:
     """Send *user_input* through the graph and return the updated state."""
     state["messages"].append(Message(role=Role.USER, content=user_input))
     state["user_input"] = user_input
@@ -276,11 +346,8 @@ def loop(
     )
 
     prompt_label = user_id if user_id and user_id != "default" else "you"
-
-    # Pending proposal accumulates across turns until approved or discarded.
     _pending_proposal: dict | None = None
 
-    # Seed the loop with an initial task if provided.
     if task.strip():
         console.print(f"[dim]Seeding loop with task:[/dim] {task.strip()}\n")
         try:
@@ -291,14 +358,15 @@ def loop(
                 state["messages"].append(
                     Message(role=Role.ASSISTANT, content=response)
                 )
-            # Check whether Faust returned a structured proposal in state.
             raw_proposal = state.get("test_proposal")
             if raw_proposal:
                 _pending_proposal = (
                     raw_proposal
                     if isinstance(raw_proposal, dict)
-                    else {"description": str(raw_proposal),
-                          "test_targets": state.get("requested_tests") or []}
+                    else {
+                        "description": str(raw_proposal),
+                        "test_targets": state.get("requested_tests") or [],
+                    }
                 )
                 _display_proposal(_pending_proposal)
         except Exception as exc:
@@ -322,10 +390,9 @@ def loop(
 
         # --- Approval branch ---------------------------------------------------
         if _pending_proposal and _APPROVE_RE.match(stripped):
-            targets = [
-                t for t in (_pending_proposal.get("test_targets") or [])
-                if _is_safe_target(t)
-            ]
+            targets = _extract_node_ids(
+                _pending_proposal.get("test_targets") or []
+            )
             if not targets:
                 console.print(
                     "[yellow]No safe test targets in this proposal — nothing to run.[/yellow]"
@@ -341,8 +408,6 @@ def loop(
             status = "[green]PASSED[/green]" if returncode == 0 else "[red]FAILED[/red]"
             console.print(f"\n[bold]Tests:[/bold] {status}")
             console.print(f"[dim]Report written to:[/dim] {report_path}")
-            # Print a short tail of the output so the operator can see
-            # results without opening the file.
             tail_lines = output.strip().splitlines()[-20:]
             if tail_lines:
                 console.print()
@@ -374,7 +439,6 @@ def loop(
         else:
             console.print("[dim]No response received.[/dim]")
 
-        # Check whether Faust returned a new structured proposal this turn.
         raw_proposal = state.get("test_proposal")
         if raw_proposal:
             _pending_proposal = (
@@ -387,7 +451,6 @@ def loop(
             )
             _display_proposal(_pending_proposal)
         else:
-            # If the graph cleared the proposal, mirror that here.
             _pending_proposal = None
 
         if debug:

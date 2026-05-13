@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Literal
+from typing import Any, List, Literal
 
 
 from pydantic import BaseModel, Field
@@ -160,6 +160,11 @@ class FaustState(TypedDict):
       entries; recalled_memories is only the per-turn projection of that store.
     - Ephemeral state: transient routing hints, retrieval diagnostics, planning notes,
       and scoped test requests that should not be treated as durable memory.
+
+    Phase 3 additions (tool_call dispatch):
+    - tool_name   : name of the registered PluginRegistry tool to dispatch.
+    - tool_inputs : keyword arguments forwarded verbatim to the plugin function.
+    - tool_result : raw return value written back by tool_call_node after dispatch.
     """
 
 
@@ -202,3 +207,15 @@ class FaustState(TypedDict):
     test_proposal: NotRequired[str | None]
     test_approved: NotRequired[bool]
     test_report_path: NotRequired[str | None]
+
+    # Step 11 Phase 2: edit-and-propose cycle.
+    # edit_proposal: an EditProposal instance or None; carried through the loop.
+    edit_proposal: NotRequired[Any]
+
+    # Step 11 Phase 3: plugin/tool dispatch fields.
+    # tool_name   : registered PluginRegistry name to dispatch (str | None).
+    # tool_inputs : kwargs forwarded to the plugin fn (empty dict if unused).
+    # tool_result : raw return value after dispatch (Any | None).
+    tool_name: NotRequired[str | None]
+    tool_inputs: NotRequired[dict]
+    tool_result: NotRequired[Any]

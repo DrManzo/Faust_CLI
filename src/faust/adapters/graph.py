@@ -544,9 +544,14 @@ def classify_task(state: FaustState) -> dict:
         return {"task_type": "general"}
 
 
-    # Step 9: test_run must be checked FIRST — before test_draft markers —
-    # so that explicit pytest execution requests ("run scoped pytest ...",
-    # "execute pytest ...") are never swallowed by the draft path.
+    # Step 9: if the approval gate is already armed from a prior turn, preserve
+    # the task_type as test_run so the role router sends this turn to coder and
+    # should_run_requested_tests can fire correctly.
+    if state.get("test_approved") and state.get("requested_tests"):
+        return {"task_type": "test_run"}
+
+    # test_run must be checked FIRST — before test_draft markers —
+    # so that explicit pytest execution requests are never swallowed by the draft path.
     test_run_markers = (
         "run scoped pytest",
         "execute scoped pytest",
@@ -556,11 +561,7 @@ def classify_task(state: FaustState) -> dict:
     if any(marker in query for marker in test_run_markers):
         return {"task_type": "test_run"}
 
-    # Step 9: test_draft must be checked before generic coding markers so that
-    # test-draft prompts do not fall through into the coder execution path.
-    # Markers are ordered most-specific first.
-    # NOTE: "scoped pytest" and bare "pytest" are intentionally NOT listed here —
-    # they are execution signals handled above by test_run_markers.
+    # test_draft must be checked before generic coding markers.
     test_draft_markers = (
         "draft a test",
         "draft test",
@@ -618,6 +619,12 @@ def route_memory(state: FaustState) -> dict:
     query = state.get("user_input", "")
     recalled = state.get("recalled_memories", [])
 
+    # Never divert an armed approval turn into the memory path.
+    if state.get("test_approved") and state.get("requested_tests"):
+        return {
+            "memory_route": "role_router",
+            "execution_notes": "Approval gate armed — bypassing memory route check.",
+        }
 
     if _is_memory_write(query):
         return {
@@ -667,8 +674,6 @@ def determine_role(state: FaustState) -> dict:
     elif task_type == "test_draft":
         role = "test_proposer"
     elif task_type in {"coding", "test_run"}:
-        # test_run routes to coder so the approval gate and
-        # run_requested_tests path can fire when test_approved is True.
         role = "coder"
     elif task_type == "reasoning":
         role = "reasoner"
@@ -724,9 +729,6 @@ def build_prompt(state: FaustState) -> dict:
         )
     elif requested_role == "coder":
         if task_type == "test_run":
-            # Step 9: test_run path — strict approval-gated instruction.
-            # The model must NOT invent commands, flags, or alternate targets.
-            # It must only acknowledge the extracted targets and ask for approval.
             requested_tests = state.get("requested_tests") or []
             targets_str = (
                 "\n".join(f"  - {t}" for t in requested_tests)
@@ -919,13 +921,7 @@ def _write_test_report(
     stdout: str,
     stderr: str,
 ) -> str:
-    """Write a human-readable markdown report to faust/reports/ and return the path.
-
-    Path is anchored to the repo root via _REPORTS_DIR so the report always lands
-    in faust/reports/ regardless of the working directory Faust is invoked from.
-    The terminal shows only a concise summary; full output lives in this file.
-    Production code is never modified by this function.
-    """
+    """Write a human-readable markdown report to faust/reports/ and return the path."""
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -956,12 +952,7 @@ def _write_test_report(
 
 
 def test_proposal_node(state: FaustState, adapter) -> dict:
-    """Generate a proposed scoped test. Does NOT run it. Requires human approval.
-
-    Step 9 boundary: this node only produces a proposal in state and as a response.
-    No pytest execution occurs here. The human must explicitly approve before
-    run_requested_tests can fire (enforced via test_approved gate).
-    """
+    """Generate a proposed scoped test. Does NOT run it. Requires human approval."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1089,40 +1080,29 @@ def coder_node(state: FaustState, adapter) -> dict:
 
 
 def should_run_requested_tests(state: FaustState) -> str:
-    """Only send coding flows with explicit approved scoped tests into the test node.
+    """Gate: only run tests when test_approved=True AND scoped targets exist.
 
-    Step 9 approval gate: test_approved must be True in state before execution fires.
-    This prevents automatic test execution without human confirmation.
+    Step 9 approval gate redesign:
+    - The old gate checked active_agent == 'coder', which broke on approval turns
+      because plain approval text routes to assistant, not coder.
+    - The new gate checks test_approved + requested_tests directly, which is
+      independent of which node just ran. This makes the gate robust to the
+      classify_task -> role_router path on approval turns.
+    - Production code is never modified here.
     """
-    if state.get("active_agent") != "coder":
-        return "save_memory"
-
-
-    # Approval gate: human must have set test_approved=True before tests run.
     if not state.get("test_approved", False):
         return "save_memory"
-
 
     requested_tests = state.get("requested_tests", [])
     if requested_tests:
         return "run_requested_tests"
-
 
     return "save_memory"
 
 
 
 def run_requested_tests(state: FaustState) -> dict:
-    """Run scoped pytest targets requested by the coding workflow.
-
-
-    Safety rules:
-    - Only explicit pytest node IDs under tests/ are allowed.
-    - No arbitrary shell commands are accepted.
-    - Results are normalized back into execution_notes.
-    - Full output is written to a timestamped report file in faust/reports/.
-    - Terminal output is kept concise (pass/fail + report path only).
-    """
+    """Run scoped pytest targets. Safety rules enforced; full output to report file."""
     requested_tests = state.get("requested_tests", [])
     if not requested_tests:
         return {
@@ -1348,9 +1328,6 @@ def make_checkpointer(config: AppConfig):
         ("faust.core.models", "MemoryRecord"),
         ("faust.core.models", "Session"),
     )
-    # NOTE: JsonPlusSerializer in the installed LangGraph version does not support
-    # allowed_objects. Revisit on library upgrade to address the pending deprecation
-    # warning about the default allowed_objects value.
     serde = JsonPlusSerializer(
         allowed_msgpack_modules=allowed_msgpack_modules,
     )
@@ -1424,7 +1401,6 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
         },
     )
     workflow.add_edge("run_requested_tests", "save_memory")
-    # Step 9: test_proposer goes directly to END — no execution, no memory write.
     workflow.add_edge("test_proposer", END)
     workflow.add_edge("save_memory", END)
 

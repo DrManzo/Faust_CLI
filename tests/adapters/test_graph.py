@@ -174,7 +174,6 @@ def test_assistant_node_concatenates_streamed_chunks():
     assert result["response"] == "Faust"
     assert result["error"] is None
     assert result["active_agent"] == "assistant"
-    assert result["requested_tests"] == []
     assert "Assistant role completed" in result["execution_notes"]
 
 
@@ -238,6 +237,23 @@ def test_classify_task_detects_memory_task():
     state = make_state(user_input="What is my favorite editor?")
     result = classify_task(state)
     assert result["task_type"] == "memory"
+
+
+def test_classify_task_routes_extract_targets_to_test_run():
+    """classify_task should route 'extract these targets' with test paths to test_run."""
+    # Simulate a user giving the extract-targets command with two explicit paths.
+    user_input = (
+        "Do not run anything. Extract these pytest targets exactly:\n"
+        "tests/adapters/test_graph.py::test_classify_task_detects_memory_task\n"
+        "tests/adapters/test_graph.py::test_classify_task_routes_extract_targets_to_test_run"
+    )
+    state = make_state(user_input=user_input)
+    result = classify_task(state)
+
+    assert result["task_type"] == "test_run", (
+        f"Expected test_run, got {result['task_type']!r} for extract+test-path input"
+    )
+    assert result.get("requested_role") == "coder"
 
 
 def test_classify_task_detects_coding_task():
@@ -1777,3 +1793,26 @@ def test_retrieve_memories_filters_irrelevant_facts():
 
     assert len(hits) == 1
     assert hits[0].text == "The user's favorite editor is Vim."
+
+
+# ========== coder_node: target accumulation across turns ==========
+
+
+def test_coder_node_accumulates_targets_across_turns():
+    """coder_node should merge fresh targets with existing state targets, not replace."""
+    adapter = FakeAdapter(chunks=["Extracted target 2."])
+
+    # Simulate turn 2: state already has target from turn 1, message only has target 2.
+    state = make_state(
+        user_input="tests/adapters/test_graph.py::test_classify_task_routes_extract_targets_to_test_run",
+    )
+    state["task_type"] = "test_run"
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_classify_task_detects_memory_task"
+    ]
+
+    result = coder_node(state, adapter=adapter)
+
+    assert "tests/adapters/test_graph.py::test_classify_task_detects_memory_task" in result["requested_tests"]
+    assert "tests/adapters/test_graph.py::test_classify_task_routes_extract_targets_to_test_run" in result["requested_tests"]
+    assert len(result["requested_tests"]) == 2

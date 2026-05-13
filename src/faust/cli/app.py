@@ -34,21 +34,20 @@ def default(
     Default behavior when you run `faust` without a subcommand.
 
     Examples:
-        faust                          # interactive chat, default profile
-        faust --user DrManzo           # interactive chat as DrManzo
+        faust                              # interactive chat, default profile
+        faust --user DrManzo               # interactive chat as DrManzo
         faust --user DrManzo --thread dev  # named thread
     """
     if ctx.invoked_subcommand is not None:
         return
 
-    # Pass resolved user_id and thread_id into the context object so
-    # chat_cmd can read them even when invoked via the bare `faust` path.
+    # Store resolved values in ctx.obj for downstream access.
     obj = ctx.ensure_object(dict)
     obj["_default_user_id"] = user_id
     obj["_default_thread_id"] = thread_id
 
-    # Invoke chat directly, forwarding profile options.
-    ctx.invoke(chat_cmd, user_id=user_id, thread_id=thread_id)
+    # Call chat_cmd directly with ctx so it receives its required first arg.
+    chat_cmd(ctx, user_id=user_id, thread_id=thread_id)
 
 
 app.command("chat")(chat_cmd)

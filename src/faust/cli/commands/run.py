@@ -1,4 +1,15 @@
-"""faust run — single-shot prompt command."""
+"""faust run — single-shot prompt command.
+
+Persistence guarantee
+---------------------
+This command passes ``thread_id`` and ``user_id`` through the
+``configurable`` dict to the graph, which means the LangGraph
+MemorySaver checkpointer *will* persist state across multiple
+``faust run`` calls that share the same ``--thread`` value.
+
+Callers that want a truly stateless single-shot call should pass
+a unique ``--thread`` value each time (e.g. a timestamp or UUID).
+"""
 
 from __future__ import annotations
 
@@ -25,7 +36,10 @@ def run(
         "default",
         "--thread",
         "-t",
-        help="Thread ID for checkpointing.",
+        help=(
+            "Thread ID for checkpointing.  Reuse the same value across "
+            "calls to accumulate context in the MemorySaver store."
+        ),
     ),
     user_id: str = typer.Option(
         "default",
@@ -50,8 +64,9 @@ def run(
 
     # State initialisation kept in sync with chat.py.
     # NOTE: run.py is single-shot so approval-gate fields start inert.
-    # Flag for later: chat.py and run.py share this init block — extract
-    # into a shared _build_initial_state() helper in a dedicated cleanup step.
+    # TODO(cleanup): chat.py and run.py share this init block — extract
+    # into a shared _build_initial_state() helper in a dedicated Phase 3
+    # refactor step once Phase 2 has been exercised.
     state: dict = {
         "session": session,
         "config": config,
@@ -74,6 +89,10 @@ def run(
     }
 
     try:
+        # Both thread_id and user_id are forwarded in `configurable` so the
+        # LangGraph MemorySaver checkpointer writes state under the correct
+        # composite key.  This is what makes `faust run --thread <id>`
+        # persist across multiple invocations.
         result = graph.invoke(
             state,
             config={
@@ -94,6 +113,8 @@ def run(
         else:
             console.print(response)
 
+    except typer.Exit:
+        raise
     except Exception as exc:
         console.print(f"[red]Unexpected error:[/red] {exc}")
         raise typer.Exit(1)

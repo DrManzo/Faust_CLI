@@ -78,7 +78,7 @@ def test_dispatch_calls_fn_and_returns_result():
         input_schema={"a": "int", "b": "int"},
         requires_approval=False,
     ))
-    result = registry.dispatch("add", {"a": 2, "b": 3}, approved=False)
+    result = registry.dispatch("add", {"a": 2, "b": 3}, approval_override=False)
     assert result == 5
 
 
@@ -90,7 +90,7 @@ def test_dispatch_approval_required_without_flag_raises_permission_error():
         requires_approval=True,
     ))
     with pytest.raises(PermissionError, match="requires explicit operator approval"):
-        registry.dispatch("guarded", {}, approved=False)
+        registry.dispatch("guarded", {}, approval_override=False)
 
 
 def test_dispatch_approval_required_with_flag_succeeds():
@@ -100,14 +100,14 @@ def test_dispatch_approval_required_with_flag_succeeds():
         fn=lambda: "ok",
         requires_approval=True,
     ))
-    result = registry.dispatch("guarded2", {}, approved=True)
+    result = registry.dispatch("guarded2", {}, approval_override=True)
     assert result == "ok"
 
 
 def test_dispatch_unknown_name_raises_key_error():
     registry = PluginRegistry()
     with pytest.raises(KeyError, match="No plugin registered"):
-        registry.dispatch("ghost", {}, approved=True)
+        registry.dispatch("ghost", {}, approval_override=True)
 
 
 # ---------------------------------------------------------------------------

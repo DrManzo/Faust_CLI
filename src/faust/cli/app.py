@@ -48,7 +48,7 @@ def default(
 
     # Use ctx.invoke so that ctx.obj (config, graph) is already populated
     # by main() before chat_cmd reads it.
-    ctx.invoke(chat_cmd, user_id=user_id, thread_id=thread_id)
+    ctx.invoke(chat_cmd, ctx=ctx, user_id=user_id, thread_id=thread_id)
 
 
 app.command("chat")(chat_cmd)

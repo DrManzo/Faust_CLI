@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from langgraph.store.memory import InMemoryStore
 
 from faust.adapters.graph import (
     _detect_recall_slot,
     _has_recalled_slot,
+    _write_test_report,
     assistant_node,
     build_graph,
     build_prompt,
@@ -19,7 +22,11 @@ from faust.adapters.graph import (
     reasoner_node,
     retrieve_memories,
     route_memory,
+    route_role,
+    run_requested_tests,
     save_memory,
+    should_run_requested_tests,
+    test_proposal_node,
 )
 from faust.core.models import AppConfig, MemoryRecord, Message, Role, Session
 
@@ -45,7 +52,7 @@ def make_state(
     user_input: str = "Hello",
     user_id: str = "test-user",
     config: AppConfig | None = None,
-    ):
+):
     """Minimal valid FaustState payload for graph tests."""
     config = config or AppConfig()
     session = Session(id="test-session", model=config.model)
@@ -63,7 +70,14 @@ def make_state(
         "artifacts": [],
         "response": "",
         "error": None,
+        "test_proposal": None,
+        "test_approved": False,
+        "test_report_path": None,
+        "requested_tests": [],
     }
+
+
+# ========== Core prompt and node tests ==========
 
 
 def test_build_prompt_injects_system_message_when_missing():
@@ -125,6 +139,23 @@ def test_build_prompt_includes_role_guidance_when_requested_role_set():
     assert system_message.role == Role.SYSTEM
     assert "Active role: reasoner" in system_message.content
     assert "planning, decomposition" in system_message.content
+
+
+def test_build_prompt_injects_test_proposer_guidance():
+    """build_prompt should inject test-draft guidance for test_proposer role."""
+    state = make_state(
+        messages=[Message(role=Role.USER, content="draft a test for foo")],
+    )
+    state["requested_role"] = "test_proposer"
+    state["task_type"] = "test_draft"
+
+    result = build_prompt(state)
+    system_message = result["messages"][0]
+
+    assert system_message.role == Role.SYSTEM
+    assert "test-draft mode" in system_message.content
+    assert "Do NOT implement production code" in system_message.content
+    assert "Do NOT run" in system_message.content
 
 
 def test_assistant_node_concatenates_streamed_chunks():
@@ -194,6 +225,9 @@ def test_coder_node_sets_active_agent_and_execution_notes():
     assert "Coder role completed" in result["execution_notes"]
 
 
+# ========== classify_task ==========
+
+
 def test_classify_task_detects_memory_task():
     """classify_task should identify memory write/recall queries as memory tasks."""
     state = make_state(user_input="remember that my favorite editor is Vim")
@@ -232,6 +266,35 @@ def test_classify_task_defaults_to_general():
     state = make_state(user_input="Hello, how are you?")
     result = classify_task(state)
     assert result["task_type"] == "general"
+
+
+# ========== Step 9: classify_task test_draft ==========
+
+
+def test_classify_task_detects_test_draft_task():
+    """classify_task should classify test-draft requests before generic coding."""
+    for phrase in [
+        "draft a test for foo",
+        "draft test for the save_memory node",
+        "propose a test for the coder node",
+        "write a test for retrieve_memories",
+        "write tests for the new slot",
+        "suggest a test for build_prompt",
+        "generate a test for the graph",
+    ]:
+        state = make_state(user_input=phrase)
+        result = classify_task(state)
+        assert result["task_type"] == "test_draft", f"Expected test_draft for: {phrase!r}"
+
+
+def test_classify_task_test_draft_takes_priority_over_coding():
+    """classify_task should not classify test drafts as coding tasks."""
+    state = make_state(user_input="write a test for the coder node")
+    result = classify_task(state)
+    assert result["task_type"] == "test_draft"
+
+
+# ========== determine_role ==========
 
 
 def test_determine_role_selects_coder_for_coding_task():
@@ -276,6 +339,372 @@ def test_determine_role_respects_explicit_requested_role():
     result = determine_role(state)
 
     assert result["requested_role"] == "coder"
+
+
+# ========== Step 9: determine_role test_proposer ==========
+
+
+def test_determine_role_selects_test_proposer_for_test_draft_task():
+    """determine_role should map test_draft tasks to test_proposer role."""
+    state = make_state(user_input="draft a test for foo")
+    state["task_type"] = "test_draft"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "test_proposer"
+    assert "test_proposer" in result["execution_notes"]
+
+
+# ========== route_role ==========
+
+
+def test_route_role_returns_test_proposer_for_test_proposer():
+    """route_role should map test_proposer requested_role to test_proposer node."""
+    state = make_state(user_input="draft a test")
+    state["requested_role"] = "test_proposer"
+    assert route_role(state) == "test_proposer"
+
+
+def test_route_role_returns_coder_for_coder():
+    state = make_state(user_input="implement fizzbuzz")
+    state["requested_role"] = "coder"
+    assert route_role(state) == "coder"
+
+
+def test_route_role_returns_reasoner_for_reasoner():
+    state = make_state(user_input="plan this")
+    state["requested_role"] = "reasoner"
+    assert route_role(state) == "reasoner"
+
+
+def test_route_role_defaults_to_assistant():
+    state = make_state(user_input="hello")
+    state["requested_role"] = "assistant"
+    assert route_role(state) == "assistant"
+
+
+# ========== Step 9: test_proposal_node ==========
+
+
+def test_test_proposal_node_returns_proposal_and_no_execution():
+    """test_proposal_node should return a proposal, set test_approved=False, not run tests."""
+    adapter = FakeAdapter(chunks=["def test_foo():\n    assert True"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="draft a test for foo")],
+        user_input="draft a test for foo",
+    )
+    state["requested_role"] = "test_proposer"
+    state["task_type"] = "test_draft"
+
+    result = test_proposal_node(state, adapter=adapter)
+
+    assert result["active_agent"] == "test_proposer"
+    assert result["intent"] == "test_draft"
+    assert "def test_foo" in result["response"]
+    assert result["test_proposal"] == result["response"]
+    assert result["test_approved"] is False
+    assert result["requested_tests"] == []
+    assert result["test_report_path"] is None
+    assert result["error"] is None
+    assert "Approve explicitly" in result["execution_notes"]
+
+
+def test_test_proposal_node_returns_error_on_adapter_failure():
+    """test_proposal_node should capture adapter failures without raising."""
+    adapter = FakeAdapter(should_fail=True)
+    state = make_state(
+        messages=[Message(role=Role.USER, content="draft a test for foo")],
+        user_input="draft a test for foo",
+    )
+
+    result = test_proposal_node(state, adapter=adapter)
+
+    assert result["response"] == ""
+    assert result["test_proposal"] is None
+    assert result["test_approved"] is False
+    assert "fake adapter failure" in result["error"]
+    assert result["active_agent"] == "test_proposer"
+
+
+def test_test_proposal_node_does_not_run_pytest(monkeypatch):
+    """test_proposal_node must never call subprocess.run."""
+    called = {}
+
+    def fake_run(*args, **kwargs):
+        called["invoked"] = True
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    adapter = FakeAdapter(chunks=["def test_bar(): pass"])
+    state = make_state(
+        messages=[Message(role=Role.USER, content="draft a test for bar")],
+    )
+
+    test_proposal_node(state, adapter=adapter)
+
+    assert "invoked" not in called, "test_proposal_node must not invoke subprocess.run"
+
+
+# ========== Step 9: approval gate ==========
+
+
+def test_should_run_requested_tests_routes_coder_with_approved_tests():
+    """Coder flows with test_approved=True and requested tests should fire run_requested_tests."""
+    state = make_state(user_input="write code")
+    state["active_agent"] = "coder"
+    state["test_approved"] = True
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "run_requested_tests"
+
+
+def test_should_run_requested_tests_blocks_without_approval():
+    """Coder flows without test_approved should skip test execution even with targets."""
+    state = make_state(user_input="write code")
+    state["active_agent"] = "coder"
+    state["test_approved"] = False
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "save_memory"
+
+
+def test_should_run_requested_tests_skips_when_not_coder():
+    """Non-coder flows should skip scoped test execution."""
+    state = make_state(user_input="plan this")
+    state["active_agent"] = "reasoner"
+    state["test_approved"] = True
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "save_memory"
+
+
+def test_should_run_requested_tests_skips_when_no_requested_tests():
+    """Coder flows without requested tests should skip scoped test execution."""
+    state = make_state(user_input="write code")
+    state["active_agent"] = "coder"
+    state["test_approved"] = True
+    state["requested_tests"] = []
+
+    result = should_run_requested_tests(state)
+
+    assert result == "save_memory"
+
+
+# ========== run_requested_tests ==========
+
+
+def test_run_requested_tests_returns_noop_when_empty():
+    """run_requested_tests should no-op when no tests were requested."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = []
+
+    result = run_requested_tests(state)
+
+    assert result["execution_notes"] == "No scoped tests requested."
+
+
+def test_run_requested_tests_rejects_invalid_targets():
+    """run_requested_tests should reject non-tests paths and unsafe targets."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "src/faust/adapters/graph.py",
+        "tests/adapters/test_graph.py; rm -rf /",
+        "tests/does_not_exist.py",
+    ]
+
+    result = run_requested_tests(state)
+
+    assert "no valid pytest targets" in result["execution_notes"].lower()
+    assert "Rejected targets:" in result["execution_notes"]
+
+
+def test_run_requested_tests_executes_valid_pytest_targets(monkeypatch):
+    """run_requested_tests should execute valid scoped pytest targets."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    captured = {}
+
+    class FakeCompletedProcess:
+        def __init__(self):
+            self.returncode = 0
+            self.stdout = "1 passed in 0.05s"
+            self.stderr = ""
+
+    def fake_run(command, capture_output, text, timeout, check):
+        captured["command"] = command
+        captured["capture_output"] = capture_output
+        captured["text"] = text
+        captured["timeout"] = timeout
+        captured["check"] = check
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "faust.adapters.graph._write_test_report",
+        lambda **kwargs: "reports/test-report-fake.md",
+    )
+
+    result = run_requested_tests(state)
+
+    assert captured["command"] == [
+        "pytest",
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end",
+        "-q",
+    ]
+    assert captured["capture_output"] is True
+    assert captured["text"] is True
+    assert captured["timeout"] == 60
+    assert captured["check"] is False
+    assert "Scoped pytest run passed" in result["execution_notes"]
+    assert "Exit code: 0." in result["execution_notes"]
+    assert "reports/test-report-fake.md" in result["execution_notes"]
+
+
+def test_run_requested_tests_records_failed_pytest_run(monkeypatch):
+    """run_requested_tests should record failing pytest output."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    class FakeCompletedProcess:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = "1 failed in 0.04s"
+            self.stderr = "AssertionError: boom"
+
+    def fake_run(command, capture_output, text, timeout, check):
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "faust.adapters.graph._write_test_report",
+        lambda **kwargs: "reports/test-report-fake.md",
+    )
+
+    result = run_requested_tests(state)
+
+    assert "Exit code: 1." in result["execution_notes"]
+    assert "FAILED" in result["execution_notes"]
+    assert "reports/test-report-fake.md" in result["execution_notes"]
+
+
+def test_run_requested_tests_handles_timeout(monkeypatch):
+    """run_requested_tests should normalize timeout output and set error."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    def fake_run(command, capture_output, text, timeout, check):
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=60,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "faust.adapters.graph._write_test_report",
+        lambda **kwargs: "reports/test-report-fake.md",
+    )
+
+    result = run_requested_tests(state)
+
+    assert result["error"] == "Scoped pytest execution timed out."
+    assert "timed out" in result["execution_notes"]
+
+
+def test_run_requested_tests_handles_unexpected_exception(monkeypatch):
+    """run_requested_tests should normalize unexpected subprocess errors."""
+    state = make_state(user_input="write code")
+    state["requested_tests"] = [
+        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
+    ]
+
+    def fake_run(command, capture_output, text, timeout, check):
+        raise RuntimeError("subprocess exploded")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = run_requested_tests(state)
+
+    assert result["error"] == "subprocess exploded"
+    assert "failed unexpectedly" in result["execution_notes"]
+    assert "subprocess exploded" in result["execution_notes"]
+
+
+# ========== Step 9: _write_test_report ==========
+
+
+def test_write_test_report_creates_file_with_expected_content(tmp_path, monkeypatch):
+    """_write_test_report should write a markdown file with status, targets, and output."""
+    monkeypatch.chdir(tmp_path)
+
+    path_str = _write_test_report(
+        targets=["tests/adapters/test_graph.py::test_foo"],
+        rejected=[],
+        returncode=0,
+        stdout="1 passed in 0.02s",
+        stderr="",
+    )
+
+    report = Path(path_str)
+    assert report.exists()
+    content = report.read_text(encoding="utf-8")
+    assert "PASSED" in content
+    assert "tests/adapters/test_graph.py::test_foo" in content
+    assert "1 passed in 0.02s" in content
+    assert "Faust Step 9" in content
+
+
+def test_write_test_report_marks_failed_status(tmp_path, monkeypatch):
+    """_write_test_report should mark FAILED when returncode is non-zero."""
+    monkeypatch.chdir(tmp_path)
+
+    path_str = _write_test_report(
+        targets=["tests/adapters/test_graph.py::test_bar"],
+        rejected=["src/faust/adapters/graph.py"],
+        returncode=1,
+        stdout="1 failed",
+        stderr="AssertionError: boom",
+    )
+
+    content = Path(path_str).read_text(encoding="utf-8")
+    assert "FAILED" in content
+    assert "src/faust/adapters/graph.py" in content
+    assert "AssertionError: boom" in content
+
+
+def test_write_test_report_does_not_modify_production_code(tmp_path, monkeypatch):
+    """_write_test_report should only write to reports/ and never touch src/."""
+    monkeypatch.chdir(tmp_path)
+
+    path_str = _write_test_report(
+        targets=["tests/adapters/test_graph.py::test_baz"],
+        rejected=[],
+        returncode=0,
+        stdout="ok",
+        stderr="",
+    )
+
+    report = Path(path_str)
+    assert "reports" in str(report)
+    src_dir = tmp_path / "src"
+    assert not src_dir.exists()
+
+
+# ========== Memory tests ==========
 
 
 def test_save_memory_ignores_non_memory_requests():
@@ -431,7 +860,6 @@ def test_sqlite_memory_persists_across_graph_instances(tmp_path):
     recalled = result.get("recalled_memories", [])
     assert any("favorite editor is Neovim" in memory.text for memory in recalled)
 
-    # Step 6: Verify deterministic memory answer instead of LLM fallback
     assert result["response"] == "Your favorite editor is Neovim."
     assert result["intent"] == "memory_recall"
     assert result["active_agent"] == "memory_answer"
@@ -494,7 +922,6 @@ def test_save_memory_overwrites_slot_based_memories():
     store = InMemoryStore()
     config = AppConfig()
 
-    # First memory
     state1 = make_state(
         user_input="remember that my favorite editor is Neovim",
         user_id="javier",
@@ -506,7 +933,6 @@ def test_save_memory_overwrites_slot_based_memories():
     assert first.text == "The user's favorite editor is Neovim."
     assert first.slot == "preference.favorite_editor"
 
-    # Second memory for the same slot
     state2 = make_state(
         user_input="remember that my favorite editor is Emacs",
         user_id="javier",
@@ -515,7 +941,6 @@ def test_save_memory_overwrites_slot_based_memories():
     result2 = save_memory(state2, store=store)
     recalled = result2["recalled_memories"]
 
-    # Only one slot-backed preference should remain, with the new value
     assert len([m for m in recalled if m.slot == "preference.favorite_editor"]) == 1
     latest = [m for m in recalled if m.slot == "preference.favorite_editor"][0]
     assert latest.text == "The user's favorite editor is Emacs."
@@ -571,7 +996,6 @@ def test_graph_preserves_artifacts_list():
         },
     )
 
-    # The graph doesn't write artifacts yet, but it should not delete them
     assert "artifacts" in result
     assert "initial-note" in result["artifacts"]
 
@@ -996,183 +1420,64 @@ def test_graph_routes_general_query_to_assistant_node():
     assert result["active_agent"] == "assistant"
     assert "Hello" in result["response"]
 
-    # ========== Step 7.2: Scoped Test Execution Tests ==========
 
-import subprocess
-
-from faust.adapters.graph import run_requested_tests, should_run_requested_tests
+# ========== Step 9: graph-level test_proposer routing ==========
 
 
-def test_should_run_requested_tests_routes_coder_with_requested_tests():
-    """Coder flows with requested tests should route into run_requested_tests."""
-    state = make_state(user_input="write code")
-    state["active_agent"] = "coder"
-    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+def test_graph_routes_test_draft_to_test_proposer_node():
+    """Graph should route test-draft requests to test_proposer, not coder."""
+    adapter = FakeAdapter(chunks=["def test_foo():\n    assert True"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
 
-    result = should_run_requested_tests(state)
+    state = make_state(
+        user_input="draft a test for the save_memory node",
+        config=config,
+    )
 
-    assert result == "run_requested_tests"
+    result = graph.invoke(
+        state,
+        config={
+            "configurable": {"thread_id": "test-draft-route", "user_id": "test-user"}
+        },
+    )
 
-
-def test_should_run_requested_tests_skips_when_not_coder():
-    """Non-coder flows should skip scoped test execution."""
-    state = make_state(user_input="plan this")
-    state["active_agent"] = "reasoner"
-    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
-
-    result = should_run_requested_tests(state)
-
-    assert result == "save_memory"
-
-
-def test_should_run_requested_tests_skips_when_no_requested_tests():
-    """Coder flows without requested tests should skip scoped test execution."""
-    state = make_state(user_input="write code")
-    state["active_agent"] = "coder"
-    state["requested_tests"] = []
-
-    result = should_run_requested_tests(state)
-
-    assert result == "save_memory"
+    assert result["active_agent"] == "test_proposer"
+    assert result["intent"] == "test_draft"
+    assert result["test_approved"] is False
+    assert result["requested_tests"] == []
+    assert result["test_report_path"] is None
 
 
-def test_run_requested_tests_returns_noop_when_empty():
-    """run_requested_tests should no-op when no tests were requested."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = []
+def test_graph_test_proposer_does_not_trigger_pytest(monkeypatch):
+    """Graph test_proposer flow must not invoke subprocess.run."""
+    called = {}
 
-    result = run_requested_tests(state)
-
-    assert result["execution_notes"] == "No scoped tests requested."
-
-
-def test_run_requested_tests_rejects_invalid_targets():
-    """run_requested_tests should reject non-tests paths and unsafe targets."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = [
-        "src/faust/adapters/graph.py",
-        "tests/adapters/test_graph.py; rm -rf /",
-        "tests/does_not_exist.py",
-    ]
-
-    result = run_requested_tests(state)
-
-    assert "no valid pytest targets" in result["execution_notes"].lower()
-    assert "Rejected targets:" in result["execution_notes"]
-
-
-def test_run_requested_tests_executes_valid_pytest_targets(monkeypatch):
-    """run_requested_tests should execute valid scoped pytest targets."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = [
-        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
-    ]
-
-    captured = {}
-
-    class FakeCompletedProcess:
-        def __init__(self):
-            self.returncode = 0
-            self.stdout = "1 passed in 0.05s"
-            self.stderr = ""
-
-    def fake_run(command, capture_output, text, timeout, check):
-        captured["command"] = command
-        captured["capture_output"] = capture_output
-        captured["text"] = text
-        captured["timeout"] = timeout
-        captured["check"] = check
-        return FakeCompletedProcess()
+    def fake_run(*args, **kwargs):
+        called["invoked"] = True
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    result = run_requested_tests(state)
+    adapter = FakeAdapter(chunks=["def test_bar(): pass"])
+    config = AppConfig()
+    graph = build_graph(adapter, config)
 
-    assert captured["command"] == [
-        "pytest",
-        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end",
-        "-q",
-    ]
-    assert captured["capture_output"] is True
-    assert captured["text"] is True
-    assert captured["timeout"] == 60
-    assert captured["check"] is False
-    assert "Ran scoped tests:" in result["execution_notes"]
-    assert "Exit code: 0." in result["execution_notes"]
-    assert "Scoped pytest run passed." in result["execution_notes"]
-    assert "1 passed in 0.05s" in result["execution_notes"]
+    state = make_state(
+        user_input="propose a test for the coder node",
+        config=config,
+    )
 
+    graph.invoke(
+        state,
+        config={
+            "configurable": {"thread_id": "test-no-run", "user_id": "test-user"}
+        },
+    )
 
-def test_run_requested_tests_records_failed_pytest_run(monkeypatch):
-    """run_requested_tests should record failing pytest output."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = [
-        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
-    ]
-
-    class FakeCompletedProcess:
-        def __init__(self):
-            self.returncode = 1
-            self.stdout = "1 failed in 0.04s"
-            self.stderr = "AssertionError: boom"
-
-    def fake_run(command, capture_output, text, timeout, check):
-        return FakeCompletedProcess()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = run_requested_tests(state)
-
-    assert "Exit code: 1." in result["execution_notes"]
-    assert "Scoped pytest run failed." in result["execution_notes"]
-    assert "1 failed in 0.04s" in result["execution_notes"]
-    assert "AssertionError: boom" in result["execution_notes"]
+    assert "invoked" not in called, "Graph test_proposer path must not call subprocess.run"
 
 
-def test_run_requested_tests_handles_timeout(monkeypatch):
-    """run_requested_tests should normalize timeout output and set error."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = [
-        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
-    ]
-
-    def fake_run(command, capture_output, text, timeout, check):
-        raise subprocess.TimeoutExpired(
-            cmd=command,
-            timeout=60,
-            output=b"partial stdout",
-            stderr=b"partial stderr",
-        )
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = run_requested_tests(state)
-
-    assert result["error"] == "Scoped pytest execution timed out."
-    assert "timed out after 60 seconds" in result["execution_notes"]
-    assert "partial stdout" in result["execution_notes"]
-    assert "partial stderr" in result["execution_notes"]
-
-
-def test_run_requested_tests_handles_unexpected_exception(monkeypatch):
-    """run_requested_tests should normalize unexpected subprocess errors."""
-    state = make_state(user_input="write code")
-    state["requested_tests"] = [
-        "tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"
-    ]
-
-    def fake_run(command, capture_output, text, timeout, check):
-        raise RuntimeError("subprocess exploded")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result = run_requested_tests(state)
-
-    assert result["error"] == "subprocess exploded"
-    assert "failed unexpectedly" in result["execution_notes"]
-    assert "subprocess exploded" in result["execution_notes"]
-
-    # ========== Step 7: Favorite Shell Slot Tests ==========
+# ========== Step 7: Favorite Shell Slot Tests ==========
 
 
 def test_detect_recall_slot_favorite_shell_variants():
@@ -1336,7 +1641,7 @@ def test_location_correction_actually():
     assert updated is not None
     assert updated.value["text"] == "The user's location is Los Angeles."
 
-    
+
 def test_retrieve_memories_sets_memory_hits_and_query():
     """retrieve_memories should populate memory_query and memory_hits for this turn."""
     store = InMemoryStore()
@@ -1344,7 +1649,6 @@ def test_retrieve_memories_sets_memory_hits_and_query():
     namespace = ("memories", "javier")
     now = datetime.now(timezone.utc)
 
-    # Seed store with one relevant memory.
     store.put(
         namespace,
         "mem-1",
@@ -1367,13 +1671,11 @@ def test_retrieve_memories_sets_memory_hits_and_query():
 
     result = retrieve_memories(state, store=store)
 
-    # memory_query and memory_hits should reflect this turn's retrieval.
     assert result["memory_query"] == "What is my favorite editor?"
     hits = result["memory_hits"]
     assert isinstance(hits, list)
     assert len(hits) == 1
     assert hits[0].text == "The user's favorite editor is Vim."
-    # recalled_memories remains the prompt-facing projection.
     assert result["recalled_memories"] == hits
 
 
@@ -1385,7 +1687,6 @@ def test_retrieve_memories_filters_irrelevant_facts():
     namespace = ("memories", "javier")
     now = datetime.now(timezone.utc)
 
-    # One relevant memory and one unrelated fact.
     store.put(
         namespace,
         "mem-editor",
@@ -1422,8 +1723,5 @@ def test_retrieve_memories_filters_irrelevant_facts():
     result = retrieve_memories(state, store=store)
     hits = result["memory_hits"]
 
-    # With max_results=1 and a specific editor query, only the editor memory should remain.
     assert len(hits) == 1
     assert hits[0].text == "The user's favorite editor is Vim."
-
-

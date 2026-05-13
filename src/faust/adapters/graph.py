@@ -1694,33 +1694,49 @@ def make_checkpointer(config: AppConfig):
 
 
 
-def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
+def build_graph(adapter_or_config, config_or_adapter=None) -> CompiledStateGraph:
     """Build and compile the LangGraph state graph with per-role model routing.
 
-    Three OllamaAdapter instances are created from the models routing config:
-      - adapter_default  -> config.models.default  (llama3:8b)         -- assistant, memory
-      - adapter_coder    -> config.models.coder     (qwen2.5-coder:14b) -- coder, test_proposer
-      - adapter_reasoner -> config.models.planner   (deepseek-r1:8b)   -- reasoner
+    Calling conventions (both supported):
+      build_graph(config)               -- normal CLI path, no injected adapter
+      build_graph(adapter, config)      -- old / test path: adapter injected for all roles
+      build_graph(config, adapter=None) -- same as first form
 
-    classify_task and _extract_requested_tests receive adapter_default so they
-    can use generate_structured() for schema-constrained JSON extraction. The
-    regex fallback is preserved for unit tests and CI where no live model is present.
+    When a non-None adapter is passed (tests use FakeAdapter), that adapter is
+    used for ALL three role slots so tests never touch a live Ollama connection.
+    Live OllamaAdapter / OpenAICompatAdapter instances are only created when
+    adapter is None (i.e. the normal production CLI path).
     """
     from faust.adapters.ollama import OllamaAdapter
     from faust.adapters.openai_compat import OpenAICompatAdapter
 
-    # Backward-compat: old call was build_graph(adapter, config).
-    if not isinstance(config, AppConfig):
-        config, adapter = adapter, config  # type: ignore[assignment]
+    # --- Argument normalisation (backward-compat) ---
+    # Old call:  build_graph(adapter, config)
+    # New call:  build_graph(config)
+    if isinstance(adapter_or_config, AppConfig):
+        config = adapter_or_config
+        injected_adapter = config_or_adapter  # may be None
+    else:
+        # adapter_or_config is actually the adapter (old call order)
+        injected_adapter = adapter_or_config
+        config = config_or_adapter
 
     def _make_adapter(model_name: str):
+        """Create a live adapter for the given model name."""
         if config.backend == "openai_compat":
             return OpenAICompatAdapter(config)
         return OllamaAdapter(config, model_override=model_name)
 
-    adapter_default  = _make_adapter(config.models.default)
-    adapter_coder    = _make_adapter(config.models.coder)
-    adapter_reasoner = _make_adapter(config.models.planner)
+    # If a test (or caller) injected an adapter, use it everywhere.
+    # Otherwise create three separate live adapters for the three roles.
+    if injected_adapter is not None:
+        adapter_default  = injected_adapter
+        adapter_coder    = injected_adapter
+        adapter_reasoner = injected_adapter
+    else:
+        adapter_default  = _make_adapter(config.models.default)
+        adapter_coder    = _make_adapter(config.models.coder)
+        adapter_reasoner = _make_adapter(config.models.planner)
 
     workflow = StateGraph(FaustState)
     store = make_memory_store(config)

@@ -57,7 +57,7 @@ class PluginRegistry:
 
         registry = PluginRegistry()
         registry.register(PluginEntry(name="my_tool", fn=my_fn, ...))
-        result = registry.dispatch("my_tool", {"arg": "value"}, approved=True)
+        result = registry.dispatch("my_tool", {"arg": "value"}, approval_override=True)
     """
 
     def __init__(self) -> None:
@@ -101,30 +101,31 @@ class PluginRegistry:
         name: str,
         inputs: Dict[str, Any],
         *,
-        approved: bool = False,
+        approval_override: bool = False,
     ) -> Any:
         """Look up *name* and call its function with *inputs*.
 
         Args:
-            name:     The registered tool name.
-            inputs:   Keyword arguments forwarded to the tool function.
-            approved: Must be True for tools with ``requires_approval=True``.
-                      The caller is responsible for obtaining approval through
-                      the human gate before setting this flag.
+            name:              The registered tool name.
+            inputs:            Keyword arguments forwarded to the tool function.
+            approval_override: Must be True for tools with
+                               ``requires_approval=True``.  The caller is
+                               responsible for obtaining approval through the
+                               human gate before setting this flag.
 
         Returns:
             The return value of the tool function.
 
         Raises:
             KeyError:        If *name* is not registered.
-            PermissionError: If the tool requires approval and ``approved``
-                             is False.
+            PermissionError: If the tool requires approval and
+                             ``approval_override`` is False.
         """
         entry = self._plugins.get(name)
         if entry is None:
             raise KeyError(f"No plugin registered under name '{name}'.")
 
-        if entry.requires_approval and not approved:
+        if entry.requires_approval and not approval_override:
             raise PermissionError(
                 f"Tool '{name}' requires explicit operator approval before "
                 "execution.  Route through the approval gate first."

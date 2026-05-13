@@ -2,9 +2,15 @@
 # Edit values here or use: faust config set
 
 backend: "ollama" # "ollama" | "openai_compat"
-model: "llama3:8b" # Default Ollama model for Faust
 temperature: 0.7 # Float 0.0-2.0; lower = more deterministic
 context_window: 8192 # Max tokens maintained in context history
+
+# Multi-model routing
+# Each role uses a dedicated local model pulled via Ollama.
+models:
+  default: "llama3.3:8b"      # General chat, memory, assistant
+  coder: "qwen2.5-coder:14b"  # Code-focused tasks, test drafting
+  planner: "deepseek-r1:8b"   # Reasoning, planning, decomposition
 
 system_prompt: |
   You are Faust, a local AI assistant.

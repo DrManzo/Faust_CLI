@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
@@ -11,9 +11,11 @@ import httpx
 class OllamaAdapter:
     """Streams responses from a local Ollama instance."""
 
-    def __init__(self, config) -> None:
+    def __init__(self, config, model_override: Optional[str] = None) -> None:
         self.base_url = config.ollama.base_url.rstrip("/")
-        self.model = config.model
+        # model_override lets callers pin a specific model for a role
+        # (e.g. coder → qwen2.5-coder:14b) without touching the base config.
+        self.model = model_override or config.models.default
         self.timeout = config.ollama.request_timeout
         self.temperature = config.temperature
         self.context_window = config.context_window

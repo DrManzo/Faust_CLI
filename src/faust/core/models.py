@@ -113,11 +113,26 @@ class MemoryRecord(BaseModel):
 
 
 
+class ModelRouteConfig(BaseModel):
+    """Per-role model routing configuration."""
+
+    default: str = "llama3.3:8b"      # General chat, memory, assistant
+    coder: str = "qwen2.5-coder:14b"  # Code-focused tasks, test drafting
+    planner: str = "deepseek-r1:8b"   # Reasoning, planning, decomposition
+
+
+
 class AppConfig(BaseModel):
     """Runtime configuration loaded from configs/default.yaml."""
 
 
-    model: str = "llama3:8b"
+    # Legacy single-model field kept for backward compatibility with tests and
+    # any code that still reads config.model directly. When a models block is
+    # present in the YAML this field is ignored in favour of models.default.
+    model: str = "llama3.3:8b"
+
+    models: ModelRouteConfig = Field(default_factory=ModelRouteConfig)
+
     backend: Literal["ollama", "openai_compat"] = "ollama"
     temperature: float = 0.7
     context_window: int = 8192

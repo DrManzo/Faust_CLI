@@ -179,3 +179,11 @@ class FaustState(TypedDict):
     ephemeral_context: NotRequired[dict[str, str] | None]
     requested_tests: NotRequired[List[str]]
     execution_notes: NotRequired[str | None]
+
+    # Step 9: tests-only workflow ephemeral state.
+    # test_proposal: proposed test file content shown to the user for review.
+    # test_approved: must be True before run_requested_tests executes anything.
+    # test_report_path: path of the written report file for this turn.
+    test_proposal: NotRequired[str | None]
+    test_approved: NotRequired[bool]
+    test_report_path: NotRequired[str | None]

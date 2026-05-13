@@ -41,6 +41,45 @@ _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _REPORTS_DIR: Path = _REPO_ROOT / "reports"
 
 
+# ---------------------------------------------------------------------------
+# JSON schemas for structured extraction
+# ---------------------------------------------------------------------------
+
+_CLASSIFY_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "task_type": {
+            "type": "string",
+            "enum": ["general", "coding", "reasoning", "test_draft", "test_run", "memory"],
+            "description": "The primary task type for this user turn.",
+        },
+        "requested_role": {
+            "type": ["string", "null"],
+            "enum": ["assistant", "coder", "reasoner", "test_proposer", None],
+            "description": "The best agent role for this turn, or null to let task_type decide.",
+        },
+    },
+    "required": ["task_type", "requested_role"],
+    "additionalProperties": False,
+}
+
+_EXTRACT_TESTS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "targets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "List of pytest target paths in the form "
+                "'tests/path/to/test_file.py::test_function_name'. "
+                "Return an empty list if no targets are mentioned."
+            ),
+        },
+    },
+    "required": ["targets"],
+    "additionalProperties": False,
+}
+
 
 @dataclass(frozen=True)
 class SlotSpec:
@@ -535,8 +574,77 @@ def retrieve_memories(state: FaustState, *, store) -> dict:
 
 
 
-def classify_task(state: FaustState) -> dict:
-    """Classify the turn into a narrow task type before role routing."""
+# ---------------------------------------------------------------------------
+# Structured classification helpers
+# ---------------------------------------------------------------------------
+
+_CLASSIFY_SYSTEM_PROMPT = """You are a task classifier. Given a user message, return ONLY a JSON object.
+
+Choose task_type from:
+- "general"     : casual chat, questions, explanations
+- "coding"      : implement code, refactor, debug, fix a bug
+- "reasoning"   : plan, design, architecture, break down a problem
+- "test_draft"  : draft / propose / write / suggest a new test
+- "test_run"    : run / execute an existing pytest test
+- "memory"      : save or recall a personal fact
+
+Choose requested_role from:
+- "assistant"      : general help
+- "coder"          : code implementation or test execution
+- "reasoner"       : planning and design
+- "test_proposer"  : test drafting
+- null             : let task_type decide
+"""
+
+_EXTRACT_TESTS_SYSTEM_PROMPT = """You are a pytest target extractor.
+Given a user message, extract all pytest targets mentioned.
+Targets look like: tests/path/to/test_file.py or tests/path/to/test_file.py::test_function_name
+Return ONLY a JSON object with a \"targets\" array. Return an empty array if none are mentioned.
+"""
+
+
+def _classify_with_adapter(query: str, adapter) -> dict | None:
+    """Call generate_structured() for task classification. Returns None on failure."""
+    if adapter is None or not hasattr(adapter, "generate_structured"):
+        return None
+    messages = [
+        {"role": "system", "content": _CLASSIFY_SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
+    try:
+        result = adapter.generate_structured(messages, _CLASSIFY_SCHEMA)
+        if result and "task_type" in result:
+            return result
+    except Exception:
+        pass
+    return None
+
+
+def _extract_tests_with_adapter(query: str, adapter) -> list[str] | None:
+    """Call generate_structured() to extract pytest targets. Returns None on failure."""
+    if adapter is None or not hasattr(adapter, "generate_structured"):
+        return None
+    messages = [
+        {"role": "system", "content": _EXTRACT_TESTS_SYSTEM_PROMPT},
+        {"role": "user", "content": query},
+    ]
+    try:
+        result = adapter.generate_structured(messages, _EXTRACT_TESTS_SCHEMA)
+        if result and isinstance(result.get("targets"), list):
+            return [t for t in result["targets"] if isinstance(t, str) and t.strip()]
+    except Exception:
+        pass
+    return None
+
+
+
+def classify_task(state: FaustState, adapter=None) -> dict:
+    """Classify the turn into a narrow task type before role routing.
+
+    Uses generate_structured() with a JSON schema for deterministic extraction
+    when an adapter is available. Falls back to regex markers when the adapter
+    is absent (unit tests / CI) or returns an empty result.
+    """
     query = _normalize_text(state.get("user_input", ""))
 
 
@@ -544,14 +652,21 @@ def classify_task(state: FaustState) -> dict:
         return {"task_type": "general"}
 
 
-    # Step 9: if the approval gate is already armed from a prior turn, preserve
-    # the task_type as test_run so the role router sends this turn to coder and
-    # should_run_requested_tests can fire correctly.
+    # Approval gate: preserve test_run if gate is already armed.
     if state.get("test_approved") and state.get("requested_tests"):
         return {"task_type": "test_run"}
 
-    # test_run must be checked FIRST — before test_draft markers —
-    # so that explicit pytest execution requests are never swallowed by the draft path.
+    # --- Structured classification (primary path) ---
+    structured = _classify_with_adapter(query, adapter)
+    if structured:
+        task_type = structured.get("task_type", "general")
+        requested_role = structured.get("requested_role")  # may be None
+        result = {"task_type": task_type}
+        if requested_role:
+            result["requested_role"] = requested_role
+        return result
+
+    # --- Regex fallback (unit tests / adapter unavailable) ---
     test_run_markers = (
         "run scoped pytest",
         "execute scoped pytest",
@@ -561,7 +676,6 @@ def classify_task(state: FaustState) -> dict:
     if any(marker in query for marker in test_run_markers):
         return {"task_type": "test_run"}
 
-    # test_draft must be checked before generic coding markers.
     test_draft_markers = (
         "draft a test",
         "draft test",
@@ -908,8 +1022,18 @@ def memory_answer_node(state: FaustState) -> dict:
 
 
 
-def _extract_requested_tests(query: str) -> list[str]:
-    """Extract narrow pytest targets from plain-text requests."""
+def _extract_requested_tests(query: str, adapter=None) -> list[str]:
+    """Extract narrow pytest targets from plain-text requests.
+
+    Uses generate_structured() with a JSON schema when an adapter is available.
+    Falls back to regex extraction when adapter is absent or returns empty.
+    """
+    # --- Structured extraction (primary path) ---
+    structured = _extract_tests_with_adapter(query, adapter)
+    if structured is not None:
+        return structured
+
+    # --- Regex fallback ---
     matches = re.findall(
         r"(tests/[A-Za-z0-9_./-]+(?:::[A-Za-z0-9_./-]+)*)",
         query,
@@ -1068,7 +1192,7 @@ def coder_node(state: FaustState, adapter) -> dict:
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
             full_response += chunk
-        requested_tests = _extract_requested_tests(state.get("user_input", ""))
+        requested_tests = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
         return {
             "response": full_response,
             "error": None,
@@ -1090,16 +1214,7 @@ def coder_node(state: FaustState, adapter) -> dict:
 
 
 def should_run_requested_tests(state: FaustState) -> str:
-    """Gate: only run tests when test_approved=True AND scoped targets exist.
-
-    Step 9 approval gate redesign:
-    - The old gate checked active_agent == 'coder', which broke on approval turns
-      because plain approval text routes to assistant, not coder.
-    - The new gate checks test_approved + requested_tests directly, which is
-      independent of which node just ran. This makes the gate robust to the
-      classify_task -> role_router path on approval turns.
-    - Production code is never modified here.
-    """
+    """Gate: only run tests when test_approved=True AND scoped targets exist."""
     if not state.get("test_approved", False):
         return "save_memory"
 
@@ -1361,21 +1476,18 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
       - adapter_coder    → config.models.coder     (qwen2.5-coder:14b) — coder, test_proposer
       - adapter_reasoner → config.models.planner   (deepseek-r1:8b)    — reasoner
 
-    The legacy single-adapter call signature (build_graph(adapter, config)) is
-    preserved via argument inspection for backward compatibility with existing tests.
+    classify_task and _extract_requested_tests receive adapter_default so they
+    can use generate_structured() for schema-constrained JSON extraction. The
+    regex fallback is preserved for unit tests and CI where no live model is present.
     """
     from faust.adapters.ollama import OllamaAdapter
     from faust.adapters.openai_compat import OpenAICompatAdapter
 
     # Backward-compat: old call was build_graph(adapter, config).
-    # New call is build_graph(config) or build_graph(config, adapter=adapter).
-    # Detect the old positional signature by checking if the first arg is not AppConfig.
     if not isinstance(config, AppConfig):
-        # Called as build_graph(adapter, config) — swap arguments.
         config, adapter = adapter, config  # type: ignore[assignment]
 
     def _make_adapter(model_name: str):
-        """Create an adapter for the given model name."""
         if config.backend == "openai_compat":
             return OpenAICompatAdapter(config)
         return OllamaAdapter(config, model_override=model_name)
@@ -1387,12 +1499,10 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
     workflow = StateGraph(FaustState)
     store = make_memory_store(config)
 
-
-    workflow.add_node(
-        "retrieve_memories",
-        partial(retrieve_memories, store=store),
-    )
-    workflow.add_node("classify_task", classify_task)
+    workflow.add_node("retrieve_memories", partial(retrieve_memories, store=store))
+    # classify_task receives adapter_default so structured JSON calls work in prod.
+    # The regex fallback fires automatically when adapter returns empty (unit tests/CI).
+    workflow.add_node("classify_task", partial(classify_task, adapter=adapter_default))
     workflow.add_node("route_memory", route_memory)
     workflow.add_node("memory_answer", memory_answer_node)
     workflow.add_node("role_router", determine_role)
@@ -1403,7 +1513,6 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
     workflow.add_node("test_proposer",  partial(test_proposal_node,  adapter=adapter_coder))
     workflow.add_node("run_requested_tests", run_requested_tests)
     workflow.add_node("save_memory", partial(save_memory, store=store))
-
 
     workflow.set_entry_point("retrieve_memories")
     workflow.add_edge("retrieve_memories", "classify_task")
@@ -1443,8 +1552,5 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
     workflow.add_edge("test_proposer", END)
     workflow.add_edge("save_memory", END)
 
-
     checkpointer = make_checkpointer(config)
-
-
     return workflow.compile(checkpointer=checkpointer, store=store)

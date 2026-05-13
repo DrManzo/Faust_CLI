@@ -13,7 +13,6 @@ from faust.core.models import Message, Role, Session
 console = Console()
 
 # Matches explicit approval language at the start of a user turn.
-# Used to carry test_approved + requested_tests across the turn boundary.
 _APPROVE_RE = re.compile(
     r"^\s*(approved?|yes[,.]?\s*(run|execute|go\s+ahead)?|APPROVE)\b",
     re.IGNORECASE,
@@ -108,9 +107,13 @@ def chat(
         "error": None,
     }
 
+    # --- Banner: show all three active model roles ---
+    models = config.models
     console.print(
-        f"[bold green]Faust[/bold green] — chatting with "
-        f"[cyan]{config.model}[/cyan]"
+        f"[bold green]Faust[/bold green] — "
+        f"[dim]assistant:[/dim] [cyan]{models.default}[/cyan]  "
+        f"[dim]coder:[/dim] [cyan]{models.coder}[/cyan]  "
+        f"[dim]reasoner:[/dim] [cyan]{models.planner}[/cyan]"
     )
     console.print(
         f"[dim]Thread:[/dim] {thread_id}    [dim]User:[/dim] {user_id}"
@@ -122,7 +125,6 @@ def chat(
         "[bold yellow]quit[/bold yellow] to end.\n"
     )
 
-    # Build the prompt label from user_id so the terminal shows e.g. "DrManzo: "
     prompt_label = user_id if user_id and user_id != "default" else "you"
 
     while True:
@@ -141,8 +143,6 @@ def chat(
         if not stripped:
             continue
 
-        # Capture approval-gate fields BEFORE resetting turn state so we can
-        # restore them after graph.invoke() if the graph clobbers them.
         _prior_tests = state.get("requested_tests") or []
         _prior_proposal = state.get("test_proposal")
         _is_approval = bool(_APPROVE_RE.match(stripped))
@@ -160,12 +160,10 @@ def chat(
         state["test_report_path"] = None
 
         if _is_approval and _prior_tests:
-            # Approval with pending targets: arm the gate.
             state["test_approved"] = True
             state["requested_tests"] = _prior_tests
             state["test_proposal"] = _prior_proposal
         else:
-            # Normal turn: reset approval state, let graph extract targets fresh.
             state["test_approved"] = False
             state["requested_tests"] = []
             state["test_proposal"] = None
@@ -181,17 +179,10 @@ def chat(
                 },
             )
 
-            # Merge graph output into state, but protect the approval-gate fields
-            # on approval turns: the graph may return them reset to falsy because
-            # classify_task treats "approve" as a general message.  We only let
-            # the graph's values win when it actually executed the test run
-            # (indicated by execution_notes being populated in the result).
             _graph_ran_tests = bool(result.get("execution_notes"))
-
             state.update(result)
 
             if _is_approval and _prior_tests and not _graph_ran_tests:
-                # Gate was armed but graph did not consume it yet — restore.
                 state["test_approved"] = True
                 state["requested_tests"] = _prior_tests
                 state["test_proposal"] = _prior_proposal

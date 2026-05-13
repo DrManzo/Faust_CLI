@@ -750,6 +750,13 @@ def build_prompt(state: FaustState) -> dict:
             )
         else:
             system_parts.append(
+                "You are the coder role. You MUST ground all code and test suggestions "
+                "in the actual repository files provided in context. "
+                "Do NOT invent classes, imports, or test helpers that are not already "
+                "present in the repo. When drafting a test, quote the existing test "
+                "function names and fixtures from the target file before proposing "
+                "anything new. If you cannot verify a class or function exists in the "
+                "repo, say so explicitly and stop. "
                 "Focus on implementation details, code changes, and relevant tests."
             )
     elif requested_role == "test_proposer":
@@ -757,7 +764,10 @@ def build_prompt(state: FaustState) -> dict:
             "You are in test-draft mode. Propose a scoped pytest test file or test "
             "function for the described behavior. Output only the proposed test code "
             "and a brief explanation. Do NOT implement production code. Do NOT run "
-            "any tests. The human will review and approve before anything executes."
+            "any tests. The human will review and approve before anything executes. "
+            "IMPORTANT: Do NOT invent classes or imports that do not exist in the repo. "
+            "Use only the testing patterns and helpers that are already present in the "
+            "test file you are targeting. If unsure, state what you cannot verify."
         )
 
 
@@ -1020,7 +1030,7 @@ def assistant_node(state: FaustState, adapter) -> dict:
 
 
 def reasoner_node(state: FaustState, adapter) -> dict:
-    """Planning and decomposition role."""
+    """Planning and decomposition role — uses deepseek-r1:8b."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1050,7 +1060,7 @@ def reasoner_node(state: FaustState, adapter) -> dict:
 
 
 def coder_node(state: FaustState, adapter) -> dict:
-    """Code-focused implementation role."""
+    """Code-focused implementation role — uses qwen2.5-coder:14b."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1343,8 +1353,37 @@ def make_checkpointer(config: AppConfig):
 
 
 
-def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
-    """Build and compile the LangGraph state graph."""
+def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
+    """Build and compile the LangGraph state graph with per-role model routing.
+
+    Three OllamaAdapter instances are created from the models routing config:
+      - adapter_default  → config.models.default  (llama3.3:8b)  — assistant, memory
+      - adapter_coder    → config.models.coder     (qwen2.5-coder:14b) — coder, test_proposer
+      - adapter_reasoner → config.models.planner   (deepseek-r1:8b)    — reasoner
+
+    The legacy single-adapter call signature (build_graph(adapter, config)) is
+    preserved via argument inspection for backward compatibility with existing tests.
+    """
+    from faust.adapters.ollama import OllamaAdapter
+    from faust.adapters.openai_compat import OpenAICompatAdapter
+
+    # Backward-compat: old call was build_graph(adapter, config).
+    # New call is build_graph(config) or build_graph(config, adapter=adapter).
+    # Detect the old positional signature by checking if the first arg is not AppConfig.
+    if not isinstance(config, AppConfig):
+        # Called as build_graph(adapter, config) — swap arguments.
+        config, adapter = adapter, config  # type: ignore[assignment]
+
+    def _make_adapter(model_name: str):
+        """Create an adapter for the given model name."""
+        if config.backend == "openai_compat":
+            return OpenAICompatAdapter(config)
+        return OllamaAdapter(config, model_override=model_name)
+
+    adapter_default  = _make_adapter(config.models.default)
+    adapter_coder    = _make_adapter(config.models.coder)
+    adapter_reasoner = _make_adapter(config.models.planner)
+
     workflow = StateGraph(FaustState)
     store = make_memory_store(config)
 
@@ -1358,10 +1397,10 @@ def build_graph(adapter, config: AppConfig) -> CompiledStateGraph:
     workflow.add_node("memory_answer", memory_answer_node)
     workflow.add_node("role_router", determine_role)
     workflow.add_node("build_prompt", build_prompt)
-    workflow.add_node("assistant", partial(assistant_node, adapter=adapter))
-    workflow.add_node("reasoner", partial(reasoner_node, adapter=adapter))
-    workflow.add_node("coder", partial(coder_node, adapter=adapter))
-    workflow.add_node("test_proposer", partial(test_proposal_node, adapter=adapter))
+    workflow.add_node("assistant",      partial(assistant_node,      adapter=adapter_default))
+    workflow.add_node("reasoner",       partial(reasoner_node,       adapter=adapter_reasoner))
+    workflow.add_node("coder",          partial(coder_node,          adapter=adapter_coder))
+    workflow.add_node("test_proposer",  partial(test_proposal_node,  adapter=adapter_coder))
     workflow.add_node("run_requested_tests", run_requested_tests)
     workflow.add_node("save_memory", partial(save_memory, store=store))
 

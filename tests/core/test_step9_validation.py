@@ -3,13 +3,17 @@
 Covers:
 - Memory slot recall and writes (Steps 5-8 regression)
 - classify_task / determine_role routing (Step 7 regression)
-- test_proposal_node approval gate (Step 9 core)
+- proposal_node approval gate (Step 9 core)
 - run_requested_tests target validation and report generation (Step 9 core)
 - _write_test_report with a simulated failure / fake error (Step 9 report)
 - Full graph state flow smoke tests (end-to-end)
 
 All tests are self-contained, use InMemoryStore + InMemorySaver,
 and never touch src/ production files.
+
+Note: test_proposal_node is imported under the alias `graph_proposal_node`
+so pytest does not accidentally collect it as a test function (pytest collects
+any callable whose name starts with `test_`).
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ from faust.adapters.graph import (
     run_requested_tests,
     save_memory,
     should_run_requested_tests,
-    test_proposal_node,
+    # Aliased so pytest does not collect this production function as a test.
+    test_proposal_node as graph_proposal_node,
 )
 from faust.core.models import AppConfig, FaustState, MemoryRecord, Message, Role, Session
 
@@ -221,6 +226,10 @@ def test_write_test_report_with_fake_error(tmp_path, monkeypatch):
     This simulates what happens when Faust runs a scoped test that fails.
     The report must contain the failure status, the fake traceback, and
     must NOT modify any file outside reports/.
+
+    Note: the report writer uses Markdown bold formatting, so the exit code
+    appears as '**Exit code:** 1' in the file. The assertion matches that
+    exact format.
     """
     monkeypatch.chdir(tmp_path)
 
@@ -248,8 +257,8 @@ def test_write_test_report_with_fake_error(tmp_path, monkeypatch):
     # Status must show FAILED
     assert "FAILED" in content, "Report must contain FAILED status."
 
-    # Exit code must be present
-    assert "Exit code: 1" in content, "Report must show exit code."
+    # Exit code is rendered as Markdown bold: **Exit code:** 1
+    assert "**Exit code:** 1" in content, "Report must show '**Exit code:** 1' in Markdown format."
 
     # The fake traceback must be preserved verbatim
     assert "AssertionError" in content, "Report must include the fake AssertionError."
@@ -278,8 +287,12 @@ def test_write_test_report_with_rejected_targets(tmp_path, monkeypatch):
 
 
 # Test 14
-def test_test_proposal_node_does_not_run_subprocess(monkeypatch):
-    """HARD: test_proposal_node NEVER calls subprocess.run, even with a real adapter."""
+def test_proposal_node_does_not_run_subprocess(monkeypatch):
+    """HARD: graph_proposal_node (test_proposal_node) NEVER calls subprocess.run.
+
+    The production function is imported as graph_proposal_node to prevent
+    pytest from collecting it directly as a test case.
+    """
     called = {}
 
     def fake_subprocess_run(*args, **kwargs):
@@ -296,9 +309,9 @@ def test_test_proposal_node_does_not_run_subprocess(monkeypatch):
         user_input="draft a test for save_memory",
         messages=[Message(role=Role.USER, content="draft a test for save_memory")],
     )
-    result = test_proposal_node(state, adapter=FakeAdapter())
+    result = graph_proposal_node(state, adapter=FakeAdapter())
 
-    assert "yes" not in called, "test_proposal_node must never call subprocess.run."
+    assert "yes" not in called, "graph_proposal_node must never call subprocess.run."
     assert result["test_approved"] is False
     assert "test_draft" == result.get("intent")
     assert "def test_foo" in result.get("test_proposal", "")

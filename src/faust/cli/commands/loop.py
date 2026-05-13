@@ -18,7 +18,6 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,10 +44,11 @@ _APPROVE_RE = re.compile(
 # Exit tokens — same set as chat.py _EXIT_TOKENS.
 _EXIT_TOKENS = frozenset({"exit", "quit", "q", "/exit"})
 
-# Only allow paths that start with ``tests/`` and end in ``.py``.
+# Only allow paths that start with ``tests/`` and optionally end in ``.py``.
 # Rejects absolute paths, ``..`` traversal, and anything outside tests/.
+# Fixed: was `(?\.py)` (invalid) — corrected to `(?:\.py)` (non-capturing group).
 _SAFE_TARGET_RE = re.compile(
-    r"^tests/[a-zA-Z0-9_/\-]+(?\.py)?$"
+    r"^tests/[a-zA-Z0-9_/\-]+(?:\.py)?$"
 )
 
 

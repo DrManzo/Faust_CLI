@@ -1253,13 +1253,17 @@ def _write_test_report(
 
 
 
-def test_proposal_node(state: FaustState, adapter) -> dict:
+def test_proposal_node(state: FaustState, *, adapter) -> dict:
     """Generate a proposed scoped test. Does NOT run it. Requires human approval.
 
     Extracts pytest targets from the user input and writes them into
     requested_tests so they survive into the next (approval) turn.
     Does NOT reset test_approved — that field stays False until the user
     explicitly approves via classify_task's approval detection.
+
+    The ``adapter`` parameter is keyword-only so the node can be called as
+    ``test_proposal_node(state, adapter=fake)`` in unit tests and bound via
+    ``functools.partial(test_proposal_node, adapter=x)`` in build_graph.
     """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
@@ -1303,13 +1307,17 @@ def test_proposal_node(state: FaustState, adapter) -> dict:
 
 
 
-def assistant_node(state: FaustState, adapter) -> dict:
+def assistant_node(state: FaustState, *, adapter) -> dict:
     """General conversation role.
 
     IMPORTANT: does NOT write requested_tests. Preserving requested_tests
     across assistant turns is critical so that the approval gate in
     classify_task can still see the targets on the next turn even if the
     user's approval phrase routes through assistant first.
+
+    The ``adapter`` parameter is keyword-only so the node can be called as
+    ``assistant_node(state, adapter=fake)`` in unit tests and bound via
+    ``functools.partial(assistant_node, adapter=x)`` in build_graph.
     """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
@@ -1338,11 +1346,15 @@ def assistant_node(state: FaustState, adapter) -> dict:
 
 
 
-def reasoner_node(state: FaustState, adapter) -> dict:
+def reasoner_node(state: FaustState, *, adapter) -> dict:
     """Planning and decomposition role — uses deepseek-r1:8b.
 
     IMPORTANT: does NOT write requested_tests for the same reason as
     assistant_node — preserving existing targets across reasoner turns.
+
+    The ``adapter`` parameter is keyword-only so the node can be called as
+    ``reasoner_node(state, adapter=fake)`` in unit tests and bound via
+    ``functools.partial(reasoner_node, adapter=x)`` in build_graph.
     """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
@@ -1370,7 +1382,7 @@ def reasoner_node(state: FaustState, adapter) -> dict:
 
 
 
-def coder_node(state: FaustState, adapter) -> dict:
+def coder_node(state: FaustState, *, adapter) -> dict:
     """Code-focused implementation role — uses qwen2.5-coder:14b.
 
     On a test_run approval turn the user message contains no pytest paths,
@@ -1380,6 +1392,10 @@ def coder_node(state: FaustState, adapter) -> dict:
 
     Targets are always MERGED with existing state targets so that multi-turn
     extract flows accumulate all paths before the approval gate fires.
+
+    The ``adapter`` parameter is keyword-only so the node can be called as
+    ``coder_node(state, adapter=fake)`` in unit tests and bound via
+    ``functools.partial(coder_node, adapter=x)`` in build_graph.
     """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""

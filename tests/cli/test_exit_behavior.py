@@ -16,7 +16,8 @@ from faust.cli.app import app
 from faust.cli.commands.loop import _is_safe_target
 from faust.core.models import AppConfig
 
-runner = CliRunner(mix_stderr=False)
+# Typer's CliRunner does not expose mix_stderr — instantiate with no kwargs.
+runner = CliRunner()
 
 
 class FakeGraph:
@@ -66,7 +67,6 @@ def test_chat_piped_stdin_exhaustion_exits_cleanly():
     result = runner.invoke(app, ["chat"], input="", obj=ctx)
     assert result.exit_code == 0
     assert "Aborted" not in result.output
-    assert "Aborted" not in (result.stderr or "")
 
 
 def test_chat_exit_after_valid_turn():

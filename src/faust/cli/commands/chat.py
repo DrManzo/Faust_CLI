@@ -122,9 +122,12 @@ def chat(
         "[bold yellow]quit[/bold yellow] to end.\n"
     )
 
+    # Build the prompt label from user_id so the terminal shows e.g. "DrManzo: "
+    prompt_label = user_id if user_id and user_id != "default" else "you"
+
     while True:
         try:
-            user_input = typer.prompt("")
+            user_input = typer.prompt(prompt_label)
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Session ended.[/dim]")
             break
@@ -138,9 +141,8 @@ def chat(
         if not stripped:
             continue
 
-        # Preserve prior approval-flow fields before resetting turn state.
-        # If this turn starts with approval language AND prior scoped targets
-        # exist, carry them forward so the test-run gate can fire correctly.
+        # Capture approval-gate fields BEFORE resetting turn state so we can
+        # restore them after graph.invoke() if the graph clobbers them.
         _prior_tests = state.get("requested_tests") or []
         _prior_proposal = state.get("test_proposal")
         _is_approval = bool(_APPROVE_RE.match(stripped))
@@ -179,7 +181,20 @@ def chat(
                 },
             )
 
+            # Merge graph output into state, but protect the approval-gate fields
+            # on approval turns: the graph may return them reset to falsy because
+            # classify_task treats "approve" as a general message.  We only let
+            # the graph's values win when it actually executed the test run
+            # (indicated by execution_notes being populated in the result).
+            _graph_ran_tests = bool(result.get("execution_notes"))
+
             state.update(result)
+
+            if _is_approval and _prior_tests and not _graph_ran_tests:
+                # Gate was armed but graph did not consume it yet — restore.
+                state["test_approved"] = True
+                state["requested_tests"] = _prior_tests
+                state["test_proposal"] = _prior_proposal
 
             response = state.get("response", "")
             error = state.get("error")

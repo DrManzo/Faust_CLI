@@ -48,6 +48,10 @@ def run(
 
     session = Session(id=thread_id, model=config.model)
 
+    # State initialisation kept in sync with chat.py.
+    # NOTE: run.py is single-shot so approval-gate fields start inert.
+    # Flag for later: chat.py and run.py share this init block — extract
+    # into a shared _build_initial_state() helper in a dedicated cleanup step.
     state: dict = {
         "session": session,
         "config": config,
@@ -55,6 +59,13 @@ def run(
         "user_input": prompt,
         "intent": None,
         "active_agent": None,
+        "requested_role": None,
+        "task_type": None,
+        "requested_tests": [],
+        "test_approved": False,
+        "test_proposal": None,
+        "test_report_path": None,
+        "execution_notes": None,
         "messages": [Message(role=Role.USER, content=prompt)],
         "recalled_memories": [],
         "artifacts": [],

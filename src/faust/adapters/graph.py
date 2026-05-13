@@ -1377,6 +1377,9 @@ def coder_node(state: FaustState, adapter) -> dict:
     so fresh extraction returns []. We fall back to whatever requested_tests
     is already in state (set by test_proposal_node on the prior turn) so
     should_run_requested_tests can open the execution gate.
+
+    Targets are always MERGED with existing state targets so that multi-turn
+    extract flows accumulate all paths before the approval gate fires.
     """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
@@ -1389,18 +1392,25 @@ def coder_node(state: FaustState, adapter) -> dict:
         # Extract targets from the current message.
         fresh_targets = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
 
-        # On a test_run approval turn the message has no paths — preserve state targets.
-        if state.get("task_type") == "test_run" and not fresh_targets:
-            requested_tests = state.get("requested_tests") or []
-        else:
-            requested_tests = fresh_targets
+        # Always merge fresh targets with whatever is already in state.
+        # This handles multi-turn extract flows where targets arrive one per turn.
+        existing_targets = state.get("requested_tests") or []
+        merged_targets = list(existing_targets)
+        for t in fresh_targets:
+            if t not in merged_targets:
+                merged_targets.append(t)
+
+        # On a test_run approval turn the message has no paths — fall back to
+        # state targets if merge produced nothing new.
+        if state.get("task_type") == "test_run" and not merged_targets:
+            merged_targets = existing_targets
 
         return {
             "response": full_response,
             "error": None,
             "intent": "coding",
             "active_agent": "coder",
-            "requested_tests": requested_tests,
+            "requested_tests": merged_targets,
             "execution_notes": "Coder role completed implementation response.",
         }
     except Exception as exc:

@@ -51,15 +51,6 @@ def test_run_command_prints_response():
     assert "hello from run" in result.output
 
 
-def test_default_callback_routes_prompt_to_run():
-    ctx_obj = make_ctx_obj(response="hello from default")
-
-    result = runner.invoke(app, ["hello", "world"], obj=ctx_obj)
-
-    assert result.exit_code == 0
-    assert "hello from default" in result.output
-
-
 def test_run_command_exits_with_error_when_graph_returns_error():
     ctx_obj = make_ctx_obj(error="graph failed")
 
@@ -82,3 +73,19 @@ def test_chat_command_single_turn_and_quit():
 
     assert result.exit_code == 0
     assert "hello from chat" in result.output
+
+
+def test_default_callback_starts_chat_when_no_subcommand():
+    ctx_obj = make_ctx_obj(response="hello from default chat")
+
+    result = runner.invoke(
+        app,
+        [],
+        input="hello\nquit\n",
+        obj=ctx_obj,
+    )
+
+    assert result.exit_code == 0
+    assert "hello from default chat" in result.output
+
+

@@ -584,16 +584,23 @@ Choose task_type from:
 - "general"     : casual chat, questions, explanations
 - "coding"      : implement code, refactor, debug, fix a bug
 - "reasoning"   : plan, design, architecture, break down a problem
-- "test_draft"  : draft / propose / write / suggest a new test
-- "test_run"    : run / execute an existing pytest test
+- "test_draft"  : compose / write / suggest a BRAND-NEW test that does not exist yet
+- "test_run"    : extract, list, identify, or RUN an existing pytest target.
+                  Use this when the user says 'extract these targets', 'do not run'
+                  (but includes test paths), 'list these pytest targets', or gives
+                  explicit pytest paths like tests/path/test_file.py::test_name.
+                  KEY RULE: if the message contains a tests/ path, choose test_run.
 - "memory"      : save or recall a personal fact
 
 Choose requested_role from:
 - "assistant"      : general help
 - "coder"          : code implementation or test execution
 - "reasoner"       : planning and design
-- "test_proposer"  : test drafting
+- "test_proposer"  : ONLY for test_draft (composing new tests from scratch)
 - null             : let task_type decide
+
+CRITICAL: test_proposer is ONLY for test_draft. If the message contains a
+tests/ path and the user says 'extract' or 'do not run', use test_run + coder.
 """
 
 _EXTRACT_TESTS_SYSTEM_PROMPT = """You are a pytest target extractor.
@@ -691,6 +698,10 @@ def classify_task(state: FaustState, adapter=None) -> dict:
     Approval detection runs FIRST: if the user sends an approval phrase and
     requested_tests are already in state, we open the gate (test_approved=True)
     and route to test_run without calling the LLM classifier.
+
+    Extract-targets detection runs SECOND: if the message contains a tests/
+    path AND 'extract' or 'do not run', we route to test_run immediately
+    without going to the LLM classifier, preventing misrouting to test_draft.
     """
     query = _normalize_text(state.get("user_input", ""))
 
@@ -712,6 +723,28 @@ def classify_task(state: FaustState, adapter=None) -> dict:
     if state.get("test_approved") and state.get("requested_tests"):
         return {"task_type": "test_run"}
 
+    # --- Extract-targets shortcut ---
+    # If the message contains a tests/ path and the user says 'extract' or
+    # 'do not run', route directly to test_run (coder) without calling the
+    # LLM classifier.  This prevents the classifier from misreading 'extract'
+    # as a test_draft / test_proposer intent.
+    _has_test_path = bool(re.search(r"tests/[a-z0-9_./-]+", query, re.IGNORECASE))
+    _extract_intent = any(
+        phrase in query
+        for phrase in (
+            "extract",
+            "do not run",
+            "don't run",
+            "list these",
+            "list the",
+        )
+    )
+    if _has_test_path and _extract_intent:
+        return {
+            "task_type": "test_run",
+            "requested_role": "coder",
+        }
+
     # --- Structured classification (primary path) ---
     structured = _classify_with_adapter(query, adapter)
     if structured:
@@ -728,6 +761,9 @@ def classify_task(state: FaustState, adapter=None) -> dict:
         "execute scoped pytest",
         "run pytest",
         "execute pytest",
+        "extract these",
+        "extract targets",
+        "extract the pytest",
     )
     if any(marker in query for marker in test_run_markers):
         return {"task_type": "test_run"}
@@ -888,13 +924,14 @@ def build_prompt(state: FaustState) -> dict:
         system_parts.append(config.system_prompt)
 
     # Inject real model names so the assistant can answer 'what models are active?'
+    # All three roles are listed explicitly so the LLM can always report all of them.
     if config and hasattr(config, "models"):
         models = config.models
         system_parts.append(
             f"Active model routing:\n"
             f"  assistant (default): {models.default}\n"
             f"  coder: {models.coder}\n"
-            f"  reasoner/planner: {models.planner}"
+            f"  reasoner: {models.planner}"
         )
 
     if requested_role:
@@ -928,16 +965,17 @@ def build_prompt(state: FaustState) -> dict:
                     "4. Do NOT add any extra commentary — keep it brief."
                 )
             else:
-                # Gate is still closed: ask for approval.
+                # Gate is still closed: tell the LLM the targets were extracted and
+                # show them back to the user so they can confirm they are correct.
                 system_parts.append(
-                    "You are in test-run mode (Step 9 approval gate).\n"
-                    "Scoped pytest targets extracted from this request:\n"
+                    "You are in test-run mode (extraction complete, awaiting approval).\n"
+                    "The following pytest targets were extracted verbatim from the user message:\n"
                     f"{targets_str}\n\n"
                     "Rules you must follow without exception:\n"
                     "1. Do NOT run any tests yet. Human approval is required first.\n"
                     "2. Do NOT invent alternate commands, flags, or output paths.\n"
                     "3. Do NOT modify or suggest changes to production code.\n"
-                    "4. Acknowledge the exact targets listed above.\n"
+                    "4. List the exact targets extracted above — no renaming or shortening.\n"
                     "5. State clearly that approval is required before execution.\n"
                     "6. Ask the human to reply with explicit approval to proceed.\n"
                     "7. If no valid targets were extracted, say so and stop."

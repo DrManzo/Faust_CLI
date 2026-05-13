@@ -8,7 +8,7 @@ Faust runs entirely offline. No API keys. No cloud dependency. You own the model
 
 ## What Faust actually does
 
-Most "AI CLIs" are a prompt piped to an API. Faust is different.
+Most “AI CLIs” are a prompt piped to an API. Faust is different.
 
 Every turn runs through a compiled **LangGraph state machine** that classifies your intent, routes to the right agent, manages short- and long-term memory, and can propose and execute scoped pytest runs — all without touching the internet.
 
@@ -33,7 +33,7 @@ Faust: [coder]
 ```text
 you: remember that my preferred shell is zsh
 
-Faust: Got it — I'll remember that your preferred shell is zsh.
+Faust: Got it — I’ll remember that your preferred shell is zsh.
 
 you: what shell do I use?
 
@@ -68,10 +68,10 @@ Faust classifies every input and routes it to the best agent path.
 | Role | Triggered by | Does |
 |---|---|---|
 | `assistant` | General Q&A | Conversational response |
-| `reasoner` | Planning, decomposition, "think through" | Step-by-step analysis |
-| `coder` | Code, refactor, "write code for" | Code generation + optional scoped test run |
-| `test_proposer` | "draft a test", "propose a test for" | Proposes test code — never executes without approval |
-| `memory_writer` | "remember that...", implicit self-facts | Writes durable user fact to memory store |
+| `reasoner` | Planning, decomposition, “think through” | Step-by-step analysis |
+| `coder` | Code, refactor, “write code for” | Code generation + optional scoped test run |
+| `test_proposer` | “draft a test”, “propose a test for” | Proposes test code — never executes without approval |
+| `memory_writer` | “remember that…”, implicit self-facts | Writes durable user fact to memory store |
 | `memory_answer` | Supported slot recall questions | Answers directly from memory — zero LLM latency |
 
 ### Deterministic memory recall
@@ -87,7 +87,32 @@ Supported memory slots:
 | `preference.favorite_editor` | `my favorite editor is Vim` | `What editor do I use?` → `Your favorite editor is Vim.` |
 | `preference.favorite_shell` | `my favorite shell is zsh` | `Which shell do I prefer?` → `Your preferred shell is zsh.` |
 
-Slot corrections with "actually" overwrite the previous value cleanly.
+Slot corrections with “actually” overwrite the previous value cleanly.
+
+### Supervised self-coding loop
+
+Faust can work on its own codebase through a controlled loop with a hard approval gate before anything runs.
+
+```bash
+faust loop --task "Fix the piped stdin exit bug"
+```
+
+```text
+Faust: [loop]
+  Proposal: Catch typer.Abort on exhausted stdin in chat.py
+  Diff: ...
+  Test targets: tests/cli/test_exit_behavior.py::test_chat_piped_stdin_exhaustion_exits_cleanly
+
+  Type approve / yes / confirm to run, or anything else to skip.
+
+you: approve
+
+Faust: Running approved targets: tests/cli/test_exit_behavior.py::...
+  Tests: PASSED
+  Report written to: reports/loop_20260513_202518.txt
+```
+
+Nothing executes until you explicitly approve. No targets outside `tests/` are accepted.
 
 ### Safe test proposal and execution
 The coder and test_proposer roles separate **proposal** from **execution**:
@@ -125,7 +150,7 @@ Faust uses `uv` for fast, reproducible installs.
 ### 2. Pull models
 
 ```bash
-ollama pull llama3:8b          # assistant
+ollama pull llama3.3:8b        # assistant (current default)
 ollama pull deepseek-r1:8b     # reasoner
 ollama pull qwen2.5-coder:14b  # coder
 ```
@@ -135,6 +160,7 @@ ollama pull qwen2.5-coder:14b  # coder
 ```bash
 faust                          # interactive session
 faust run "explain LangGraph"  # single-shot prompt
+faust loop                     # supervised self-coding loop
 ```
 
 ---
@@ -143,7 +169,7 @@ faust run "explain LangGraph"  # single-shot prompt
 
 | Model | Role | Pull |
 |---|---|---|
-| `llama3:8b` | General assistant | `ollama pull llama3:8b` |
+| `llama3.3:8b` | General assistant | `ollama pull llama3.3:8b` |
 | `deepseek-r1:8b` | Reasoning and planning | `ollama pull deepseek-r1:8b` |
 | `qwen2.5-coder:14b` | Code-oriented tasks | `ollama pull qwen2.5-coder:14b` |
 
@@ -153,7 +179,10 @@ faust run "explain LangGraph"  # single-shot prompt
 
 ```bash
 faust                             # Open interactive session (default)
-faust run "<prompt>"              # Single-shot prompt, no session
+faust run "<prompt>"              # Single-shot prompt, persisted to --thread
+faust loop                        # Supervised self-coding control loop
+faust loop --task "<task>"        # Seed the loop with an initial task
+faust loop --thread step11        # Named thread for loop continuity
 faust config                      # Show resolved config
 faust --help                      # Full command reference
 ```
@@ -162,8 +191,8 @@ faust --help                      # Full command reference
 
 | Input | Action |
 |---|---|
-| `quit` or `exit` | End session cleanly |
-| `/exit` | Force exit |
+| `quit`, `exit`, or `q` | End session cleanly |
+| `/exit` | Force exit (also works in loop) |
 
 ---
 
@@ -178,12 +207,12 @@ faust --help                      # Full command reference
 ## Test suite
 
 ```bash
-pytest -q                        # fast baseline
-pytest -v --tb=short             # verbose with tracebacks
-pytest tests/adapters/test_graph.py -v   # graph layer only
+pytest tests/ -v --tb=short      # full suite (186 tests)
+pytest tests/adapters/test_graph.py -v   # graph layer only (90 tests)
+pytest tests/cli/ -v             # CLI and loop tests
 ```
 
-Current automated baseline: **90 passing tests in < 0.6s** (graph suite, all in-memory).
+Current automated baseline: **186 passing tests in < 0.65s**, all in-memory.
 
 ---
 
@@ -195,7 +224,7 @@ All runtime data stays local and is excluded from version control.
 data/faust.db          ← LangGraph checkpoint database (SQLite)
 data/faust_memory.db   ← Long-term memory store (SQLite)
 data/sessions/         ← Optional JSON session exports
-reports/               ← Scoped pytest reports written by coder node
+reports/               ← Scoped pytest reports written by coder and loop nodes
 ```
 
 ---
@@ -206,13 +235,17 @@ reports/               ← Scoped pytest reports written by coder node
 src/faust/
 ├── adapters/     ← Ollama + OpenAI adapters, graph.py
 ├── agents/       ← Agent node definitions
-├── cli/          ← Typer CLI commands
+├── cli/          ← Typer CLI commands (chat, loop, run, config)
+│   ├── commands/   ← chat.py, loop.py, run.py
+│   └── constants.py ← Shared exit tokens, approval regex, option resolver
 └── core/         ← Models, config, memory, testing helpers
 
 tests/
-├── adapters/     ← Graph-level integration tests (90 tests)
-├── cli/          ← CLI command tests
-└── core/         ← Unit tests for core modules
+├── adapters/     ← Graph + Ollama adapter tests (92 tests)
+├── agents/       ← Agent-level tests (Step 11+)
+├── cli/          ← CLI, loop, renderer tests (36 tests)
+├── core/         ← Config, models, session, memory, testing (58 tests)
+└── test_results/ ← Test run artifacts
 ```
 
 ---
@@ -228,6 +261,9 @@ make test
 
 # Run only the graph suite
 pytest tests/adapters/test_graph.py -v
+
+# Run the loop in supervised mode
+faust loop --task "<describe what you want Faust to work on>"
 ```
 
 ---
@@ -238,6 +274,7 @@ pytest tests/adapters/test_graph.py -v
 - **Determinism over probability** for anything you already know. Supported memory recall never uses the LLM.
 - **Proposal before execution.** Tests are drafted and shown to you before any subprocess fires.
 - **Narrow and durable over broad and fuzzy.** Memory slots are explicit contracts, not embeddings or fuzzy search.
+- **Approval gates, not trust.** The loop never runs code without explicit human confirmation. Every production change goes through you.
 - **Local always.** Ollama-first. No outbound calls during inference.
 
 ---
@@ -246,4 +283,4 @@ pytest tests/adapters/test_graph.py -v
 
 Faust is an actively evolving local assistant project. The current foundation is intentionally stable — graph wiring, memory system, role routing, and test safety boundaries are all locked behind tests before new capabilities are added.
 
-**Current focus:** CLI UX polish, expanded memory slots, and plugin architecture groundwork.
+**Step 10 complete.** CLI exit behavior is clean across all modes (interactive, piped, single-shot). The supervised self-coding loop (`faust loop`) is live with a hard approval gate. All 186 tests pass. The repo is clean and ready for Step 11.

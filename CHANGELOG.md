@@ -4,6 +4,79 @@ All notable changes to Faust are documented here, step by step.
 
 ---
 
+## [Step 10] — 2026-05-13 — CLI Polish, Controlled Loop, and Structural Cleanup
+
+Step 10 delivered in three ordered phases: CLI reliability first, supervised self-coding loop second, structural refactor third. No phase started until the previous one was validated.
+
+### Phase 1 — CLI Polish and Persistence Cleanup
+
+**`fix(cli): handle piped stdin exit cleanly`**
+- Added `_EXIT_TOKENS` frozen set (`exit`, `quit`, `q`, `/exit`) checked before any graph invocation.
+- Added `typer.Abort` to the `except` clause on `typer.prompt` alongside `EOFError` and `KeyboardInterrupt` — this is the exact exception Typer raises when a pipe closes, eliminating the trailing `Aborted.` message.
+- Exit tokens now short-circuit before a model turn is ever attempted.
+
+**`fix(cli): persist faust run turns to checkpoint memory`**
+- Documented the existing persistence mechanism clearly: same `--thread` = same checkpoint key = accumulated context across `faust run` calls.
+- Clarified how to get stateless behavior (unique `--thread` per call).
+- Added `re-raise typer.Exit` so piped callers receive correct exit codes on failure.
+- Closes the known `faust run` persistence gap tracked since Step 9.
+
+### Phase 2 — Controlled Loop
+
+**`feat(loop): add approval-gated self-coding control loop`**
+- New `src/faust/cli/commands/loop.py` — the supervised self-improvement loop.
+- Faust drafts proposals (description + diff + test targets) and displays them for human review.
+- Nothing executes until the operator types `approve`, `yes`, or `confirm`.
+- Approved targets are passed to `pytest -v --tb=short` under the existing safety gate.
+- Timestamped reports written to `reports/loop_YYYYMMDD_HHMMSS.txt`.
+- Last 20 lines of output printed inline.
+
+**`feat(cli): register loop command`**
+- `loop_cmd` imported and registered as `faust loop` in `app.py`.
+
+**`test(cli): add targeted exit-behavior tests`**
+- New `tests/cli/test_exit_behavior.py` — 27 tests covering:
+  - All exit token paths (interactive and loop).
+  - Piped stdin exhaustion exits cleanly.
+  - Post-turn `/exit` terminates with exactly one graph call.
+  - `_is_safe_target` safety gate matrix.
+
+### Phase 3 — Structural Refactor and Housekeeping
+
+**`refactor(loop): extract shared constants + ground node-id proposals`**
+- New `src/faust/cli/constants.py` — single source of truth for `_APPROVE_RE`, `_EXIT_TOKENS`, and `_resolve_option`. Both `chat.py` and `loop.py` now import from it.
+- `_APPROVE_RE` extended to also match `confirm`.
+- New `_extract_node_ids()` in `loop.py` — when the model returns sloppy output (e.g. `test_foo::test_bar` without a `tests/` prefix), the function scans for an embedded valid node-id, emits a visible warning, and uses it. Pure garbage is rejected with a clear message before the approval prompt. Eliminates the silent `not found` errors from pytest on malformed targets.
+- `_is_safe_target` regex extended to accept full pytest node-id forms: `tests/path.py::test_func` and `tests/path.py::Class::method`.
+
+**`test(loop): extend safety-gate tests to cover node-id normalisation`**
+- `_is_safe_target` parametrize table extended with full node-id forms and malformed cases.
+- Five new `_extract_node_ids` tests: valid pass-through, missing prefix rejection, embedded extraction, pure garbage rejection, empty/blank inputs.
+
+**`fix(loop): allow bare tests/ directory sweep in _SAFE_TARGET_RE`**
+- Changed `[a-zA-Z0-9_/\-]+` to `*` so `tests/` (full directory sweep) is accepted.
+- Previously rejected due to `+` (one-or-more) requiring at least one character after the slash.
+
+**`cleanup: resolve three pre-Step-11 housekeeping gaps`**
+- `tests/test results/` renamed to `tests/test_results/` (space removed from directory name).
+- `tests/agents/.gitkeep` and `tests/core/.gitkeep` added so both directories are git-tracked.
+- `tests/cli/test_renderer.py` added — four tests covering all public functions in `renderer.py` (`print_banner`, `print_response`, `print_error`, `print_session_info`).
+
+**`fix(tests): align stale test stubs to current AppConfig shape`**
+- `FakeOllamaConfig` in `test_ollama.py` updated to expose `.models` `SimpleNamespace` matching the multi-model `ModelConfig` shape that `OllamaAdapter.__init__` now reads.
+- `test_app_config_defaults` updated from `llama3:8b` to `llama3.3:8b` to match the current `AppConfig` default.
+
+### Safety guarantees — unchanged
+- No execution without explicit operator approval.
+- No pytest targets outside `tests/`.
+- No shell metacharacter acceptance.
+- No silent production code writes outside the approved workflow.
+
+### Baseline after Step 10
+- **186 passing tests** across all suites — 0.65s, fully in-memory.
+
+---
+
 ## [Step 9] — 2026-05-13 — Test Safety System
 
 Faust can now **propose** and **execute** scoped pytest runs as a first-class graph operation — with a hard approval gate that keeps humans in control.
@@ -151,12 +224,3 @@ Faust boots from the command line and talks to a local model.
 - `AppConfig` loaded from `configs/default.yaml`
 - Interactive REPL loop with `quit`/`exit` termination
 - Debug mode output showing active agent, role, and task type per turn
-
----
-
-## Known issues
-
-| Issue | Severity | Status |
-|---|---|---|
-| Piped stdin (`printf ... \| faust`) exits with a cosmetic `Aborted.` message after the last turn | Low | Tracked — targeted for CLI polish pass |
-| `faust run` single-shot command does not yet persist to checkpoint | Low | Tracked |

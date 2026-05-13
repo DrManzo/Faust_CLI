@@ -599,7 +599,19 @@ Choose requested_role from:
 _EXTRACT_TESTS_SYSTEM_PROMPT = """You are a pytest target extractor.
 Given a user message, extract all pytest targets mentioned.
 Targets look like: tests/path/to/test_file.py or tests/path/to/test_file.py::test_function_name
-Return ONLY a JSON object with a \"targets\" array. Return an empty array if none are mentioned.
+
+CRITICAL RULES — you must follow these exactly:
+1. Copy every path and function name VERBATIM from the user message. Do NOT shorten, rename,
+   or invent any part of the path or function name.
+2. If the user types "tests/adapters/test_graph.py::test_classify_task_detects_memory_task",
+   you output exactly that string — nothing else.
+3. Do NOT replace a long function name with a shorter invented one (e.g. do NOT turn
+   "test_classify_task_detects_memory_task" into "test_classify_task").
+4. Do NOT add or remove the "::" separator or the file extension.
+5. If you are unsure about any character in a name, copy the user's text character-for-character.
+6. Return an empty array if no pytest targets are present in the message.
+
+Return ONLY a JSON object with a "targets" array.
 """
 
 # ---------------------------------------------------------------------------
@@ -1321,6 +1333,16 @@ def should_run_requested_tests(state: FaustState) -> str:
 
 
 
+def _resolve_test_file(test_file: str) -> bool:
+    """Return True if test_file exists, checking CWD then _REPO_ROOT as fallback."""
+    p = Path(test_file)
+    if p.exists():
+        return True
+    rooted = _REPO_ROOT / test_file
+    return rooted.exists()
+
+
+
 def run_requested_tests(state: FaustState) -> dict:
     """Run scoped pytest targets. Safety rules enforced; full output to report file."""
     requested_tests = state.get("requested_tests", [])
@@ -1353,7 +1375,7 @@ def run_requested_tests(state: FaustState) -> dict:
 
 
         test_file = cleaned.split("::", 1)[0]
-        if not Path(test_file).exists():
+        if not _resolve_test_file(test_file):
             rejected_targets.append(cleaned)
             continue
 

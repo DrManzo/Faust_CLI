@@ -18,6 +18,9 @@ _APPROVE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# All tokens that trigger a clean exit before a model turn is attempted.
+_EXIT_TOKENS = frozenset({"exit", "quit", "q", "/exit"})
+
 
 def _resolve_option(value, fallback: str) -> str:
     """Convert Typer OptionInfo defaults into plain strings."""
@@ -130,13 +133,20 @@ def chat(
     while True:
         try:
             user_input = typer.prompt(prompt_label)
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, typer.Abort):
+            # Covers: Ctrl-C, Ctrl-D, and exhausted pipe stdin.
+            # typer.Abort is raised by Click/Typer when stdin is a closed
+            # pipe that has no more data — catching it here prevents the
+            # trailing 'Aborted.' message from leaking to the terminal.
             console.print("\n[dim]Session ended.[/dim]")
             break
 
         stripped = user_input.strip()
 
-        if stripped.lower() in ("exit", "quit", "q"):
+        # Clean exit: check BEFORE any model turn is attempted so that
+        # piped sessions (e.g. printf '..\n/exit\n' | faust) terminate
+        # without triggering another graph invocation.
+        if stripped.lower() in _EXIT_TOKENS:
             console.print("[dim]Goodbye.[/dim]")
             break
 

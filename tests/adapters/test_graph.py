@@ -26,7 +26,8 @@ from faust.adapters.graph import (
     run_requested_tests,
     save_memory,
     should_run_requested_tests,
-    test_proposal_node,
+    # Aliased so pytest does not collect this production function as a test.
+    test_proposal_node as graph_proposal_node,
 )
 from faust.core.models import AppConfig, MemoryRecord, Message, Role, Session
 
@@ -383,11 +384,13 @@ def test_route_role_defaults_to_assistant():
     assert route_role(state) == "assistant"
 
 
-# ========== Step 9: test_proposal_node ==========
+# ========== Step 9: graph_proposal_node (production: test_proposal_node) ==========
+# NOTE: imported as graph_proposal_node to prevent pytest from collecting the
+# production function by its original name (test_proposal_node).
 
 
-def test_test_proposal_node_returns_proposal_and_no_execution():
-    """test_proposal_node should return a proposal, set test_approved=False, not run tests."""
+def test_proposal_node_returns_proposal_and_no_execution():
+    """graph_proposal_node should return a proposal, set test_approved=False, not run tests."""
     adapter = FakeAdapter(chunks=["def test_foo():\n    assert True"])
     state = make_state(
         messages=[Message(role=Role.USER, content="draft a test for foo")],
@@ -396,7 +399,7 @@ def test_test_proposal_node_returns_proposal_and_no_execution():
     state["requested_role"] = "test_proposer"
     state["task_type"] = "test_draft"
 
-    result = test_proposal_node(state, adapter=adapter)
+    result = graph_proposal_node(state, adapter=adapter)
 
     assert result["active_agent"] == "test_proposer"
     assert result["intent"] == "test_draft"
@@ -409,15 +412,15 @@ def test_test_proposal_node_returns_proposal_and_no_execution():
     assert "Approve explicitly" in result["execution_notes"]
 
 
-def test_test_proposal_node_returns_error_on_adapter_failure():
-    """test_proposal_node should capture adapter failures without raising."""
+def test_proposal_node_returns_error_on_adapter_failure():
+    """graph_proposal_node should capture adapter failures without raising."""
     adapter = FakeAdapter(should_fail=True)
     state = make_state(
         messages=[Message(role=Role.USER, content="draft a test for foo")],
         user_input="draft a test for foo",
     )
 
-    result = test_proposal_node(state, adapter=adapter)
+    result = graph_proposal_node(state, adapter=adapter)
 
     assert result["response"] == ""
     assert result["test_proposal"] is None
@@ -426,8 +429,8 @@ def test_test_proposal_node_returns_error_on_adapter_failure():
     assert result["active_agent"] == "test_proposer"
 
 
-def test_test_proposal_node_does_not_run_pytest(monkeypatch):
-    """test_proposal_node must never call subprocess.run."""
+def test_proposal_node_does_not_run_pytest(monkeypatch):
+    """graph_proposal_node must never call subprocess.run."""
     called = {}
 
     def fake_run(*args, **kwargs):
@@ -440,9 +443,9 @@ def test_test_proposal_node_does_not_run_pytest(monkeypatch):
         messages=[Message(role=Role.USER, content="draft a test for bar")],
     )
 
-    test_proposal_node(state, adapter=adapter)
+    graph_proposal_node(state, adapter=adapter)
 
-    assert "invoked" not in called, "test_proposal_node must not invoke subprocess.run"
+    assert "invoked" not in called, "graph_proposal_node must not invoke subprocess.run"
 
 
 # ========== Step 9: approval gate ==========

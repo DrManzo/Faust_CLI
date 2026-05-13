@@ -15,16 +15,40 @@ app = typer.Typer(
 
 
 @app.callback()
-def default(ctx: typer.Context) -> None:
+def default(
+    ctx: typer.Context,
+    user_id: str = typer.Option(
+        "default",
+        "--user",
+        "-u",
+        help="Stable user ID / profile (e.g. DrManzo).",
+    ),
+    thread_id: str = typer.Option(
+        "default",
+        "--thread",
+        "-t",
+        help="Conversation thread ID.",
+    ),
+) -> None:
     """
     Default behavior when you run `faust` without a subcommand.
 
-    - `faust` -> start interactive chat
+    Examples:
+        faust                          # interactive chat, default profile
+        faust --user DrManzo           # interactive chat as DrManzo
+        faust --user DrManzo --thread dev  # named thread
     """
     if ctx.invoked_subcommand is not None:
         return
 
-    chat_cmd(ctx)
+    # Pass resolved user_id and thread_id into the context object so
+    # chat_cmd can read them even when invoked via the bare `faust` path.
+    obj = ctx.ensure_object(dict)
+    obj["_default_user_id"] = user_id
+    obj["_default_thread_id"] = thread_id
+
+    # Invoke chat directly, forwarding profile options.
+    ctx.invoke(chat_cmd, user_id=user_id, thread_id=thread_id)
 
 
 app.command("chat")(chat_cmd)

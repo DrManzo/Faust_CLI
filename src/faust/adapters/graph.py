@@ -33,6 +33,13 @@ from faust.core.models import AppConfig, FaustState, MemoryRecord, Message, Role
 
 _GRAPH_RESOURCES: list[ExitStack] = []
 
+# ---------------------------------------------------------------------------
+# Report path — always faust/reports/ regardless of CWD.
+# src/faust/adapters/graph.py  ->  three parents up  ->  repo root (faust/)
+# ---------------------------------------------------------------------------
+_REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+_REPORTS_DIR: Path = _REPO_ROOT / "reports"
+
 
 
 @dataclass(frozen=True)
@@ -716,9 +723,33 @@ def build_prompt(state: FaustState) -> dict:
             "Focus on planning, decomposition, tradeoffs, and clear execution steps."
         )
     elif requested_role == "coder":
-        system_parts.append(
-            "Focus on implementation details, code changes, and relevant tests."
-        )
+        if task_type == "test_run":
+            # Step 9: test_run path — strict approval-gated instruction.
+            # The model must NOT invent commands, flags, or alternate targets.
+            # It must only acknowledge the extracted targets and ask for approval.
+            requested_tests = state.get("requested_tests") or []
+            targets_str = (
+                "\n".join(f"  - {t}" for t in requested_tests)
+                if requested_tests
+                else "  (none extracted — check your target format)"
+            )
+            system_parts.append(
+                "You are in test-run mode (Step 9 approval gate).\n"
+                "Scoped pytest targets extracted from this request:\n"
+                f"{targets_str}\n\n"
+                "Rules you must follow without exception:\n"
+                "1. Do NOT run any tests yet. Human approval is required first.\n"
+                "2. Do NOT invent alternate commands, flags, or output paths.\n"
+                "3. Do NOT modify or suggest changes to production code.\n"
+                "4. Acknowledge the exact targets listed above.\n"
+                "5. State clearly that approval is required before execution.\n"
+                "6. Ask the human to reply with explicit approval to proceed.\n"
+                "7. If no valid targets were extracted, say so and stop."
+            )
+        else:
+            system_parts.append(
+                "Focus on implementation details, code changes, and relevant tests."
+            )
     elif requested_role == "test_proposer":
         system_parts.append(
             "You are in test-draft mode. Propose a scoped pytest test file or test "
@@ -888,17 +919,18 @@ def _write_test_report(
     stdout: str,
     stderr: str,
 ) -> str:
-    """Write a human-readable markdown report file and return its path.
+    """Write a human-readable markdown report to faust/reports/ and return the path.
 
-    The terminal shows only a concise summary; full output lives in the report.
+    Path is anchored to the repo root via _REPORTS_DIR so the report always lands
+    in faust/reports/ regardless of the working directory Faust is invoked from.
+    The terminal shows only a concise summary; full output lives in this file.
     Production code is never modified by this function.
     """
-    reports_dir = Path("reports")
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    report_path = reports_dir / f"test-report-{timestamp}.md"
+    report_path = _REPORTS_DIR / f"test-report-{timestamp}.md"
 
 
     status = "PASSED" if returncode == 0 else "FAILED"
@@ -1088,7 +1120,7 @@ def run_requested_tests(state: FaustState) -> dict:
     - Only explicit pytest node IDs under tests/ are allowed.
     - No arbitrary shell commands are accepted.
     - Results are normalized back into execution_notes.
-    - Full output is written to a timestamped report file in reports/.
+    - Full output is written to a timestamped report file in faust/reports/.
     - Terminal output is kept concise (pass/fail + report path only).
     """
     requested_tests = state.get("requested_tests", [])

@@ -10,7 +10,8 @@ def test_message_to_dict():
 
 def test_app_config_defaults():
     config = AppConfig()
-    # Default model from core.models.AppConfig
-    assert config.model == "llama3:8b"
+    # Default model reflects the current AppConfig default (llama3.3:8b).
+    # Updated from llama3:8b when the multi-model ModelConfig was introduced.
+    assert config.model == "llama3.3:8b"
     assert config.backend == "ollama"
     assert 0.0 <= config.temperature <= 2.0

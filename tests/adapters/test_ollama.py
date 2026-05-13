@@ -13,12 +13,17 @@ from faust.adapters.ollama import OllamaAdapter
 
 
 class FakeOllamaConfig:
-    """Minimal config stub matching the attributes used by OllamaAdapter."""
+    """Minimal config stub matching the attributes used by OllamaAdapter.
+
+    OllamaAdapter.__init__ reads config.models.default (multi-model shape)
+    so we expose a .models SimpleNamespace in addition to the flat .model
+    attribute kept for backward compatibility.
+    """
 
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model: str = "llama3:8b",
+        model: str = "llama3.3:8b",
         request_timeout: float = 30.0,
         temperature: float = 0.7,
         context_window: int = 8192,
@@ -29,6 +34,12 @@ class FakeOllamaConfig:
         self.ollama = SimpleNamespace(
             base_url=base_url,
             request_timeout=request_timeout,
+        )
+        # Multi-model shape expected by OllamaAdapter.__init__
+        self.models = SimpleNamespace(
+            default=model,
+            coder=model,
+            planner=model,
         )
 
 
@@ -68,7 +79,7 @@ def test_ollama_adapter_generate_yields_streamed_chunks(
     def fake_stream(self, method: str, url: str, json: Dict[str, Any]):
         assert method == "POST"
         assert url == "http://localhost:11434/api/chat"
-        assert json["model"] == "llama3:8b"
+        assert json["model"] == "llama3.3:8b"
         assert json["messages"] == messages_payload
         assert json["stream"] is True
         assert json["options"]["temperature"] == 0.7

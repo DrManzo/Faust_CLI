@@ -687,6 +687,27 @@ def _extract_tests_with_adapter(query: str, adapter) -> list[str] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Regex-only fast target extraction (no LLM, used in build_prompt)
+# ---------------------------------------------------------------------------
+
+def _extract_targets_regex(text: str) -> list[str]:
+    """Extract pytest targets from text using regex only (no LLM call).
+
+    Used by build_prompt so the system prompt always reflects the real targets
+    even on turn 1 before coder_node has written them back to state.
+    """
+    matches = re.findall(
+        r"(tests/[A-Za-z0-9_./-]+(?:::[A-Za-z0-9_./-]+)*)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    deduped: list[str] = []
+    for match in matches:
+        if match not in deduped:
+            deduped.append(match)
+    return deduped
+
 
 def classify_task(state: FaustState, adapter=None) -> dict:
     """Classify the turn into a narrow task type before role routing.
@@ -910,7 +931,13 @@ def route_role(state: FaustState) -> str:
 
 
 def build_prompt(state: FaustState) -> dict:
-    """Ensure system prompt is first and inject recalled memories and role guidance."""
+    """Ensure system prompt is first and inject recalled memories and role guidance.
+
+    For test_run turns, targets are pre-extracted from user_input via regex if
+    requested_tests in state is still empty (i.e. we are on turn 1 before
+    coder_node has written them back). This guarantees the system prompt always
+    shows the correct targets to the LLM regardless of turn order.
+    """
     current = list(state.get("messages", []))
     config = state.get("config")
     recalled = state.get("recalled_memories", [])
@@ -946,7 +973,15 @@ def build_prompt(state: FaustState) -> dict:
         )
     elif requested_role == "coder":
         if task_type == "test_run":
+            # --- Pre-extract targets from user_input if state is still empty ---
+            # On turn 1, coder_node hasn't run yet so requested_tests in state is [].
+            # We run a fast regex extraction here so the system prompt always has the
+            # real targets before the LLM sees the message.
             requested_tests = state.get("requested_tests") or []
+            if not requested_tests:
+                user_input = state.get("user_input", "")
+                requested_tests = _extract_targets_regex(user_input)
+
             targets_str = (
                 "\n".join(f"  - {t}" for t in requested_tests)
                 if requested_tests
@@ -1152,16 +1187,7 @@ def _extract_requested_tests(query: str, adapter=None) -> list[str]:
         return structured
 
     # --- Regex fallback ---
-    matches = re.findall(
-        r"(tests/[A-Za-z0-9_./-]+(?:::[A-Za-z0-9_./-]+)*)",
-        query,
-        flags=re.IGNORECASE,
-    )
-    deduped: list[str] = []
-    for match in matches:
-        if match not in deduped:
-            deduped.append(match)
-    return deduped
+    return _extract_targets_regex(query)
 
 
 

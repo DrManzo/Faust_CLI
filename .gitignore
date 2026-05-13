@@ -43,3 +43,5 @@ data/*.db-wal
 # Editor / OS
 .DS_Store
 Thumbs.db
+
+reports/test-report-*.md

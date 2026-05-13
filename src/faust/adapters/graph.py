@@ -602,6 +602,37 @@ Targets look like: tests/path/to/test_file.py or tests/path/to/test_file.py::tes
 Return ONLY a JSON object with a \"targets\" array. Return an empty array if none are mentioned.
 """
 
+# ---------------------------------------------------------------------------
+# Approval detection
+# ---------------------------------------------------------------------------
+
+_APPROVAL_PHRASES: tuple[str, ...] = (
+    "approved",
+    "yes run",
+    "go ahead",
+    "run the tests",
+    "run tests",
+    "execute the tests",
+    "execute tests",
+    "run scoped",
+    "execute scoped",
+    "confirmed",
+    "proceed",
+    "yes proceed",
+    "do it",
+    "test is approved",
+    "tests are approved",
+    "this is approved",
+    "faust this test is approved",
+    "faust run",
+)
+
+
+def _is_approval(query: str) -> bool:
+    """Return True if the user message is an explicit test-run approval."""
+    q = _normalize_text(query)
+    return any(phrase in q for phrase in _APPROVAL_PHRASES)
+
 
 def _classify_with_adapter(query: str, adapter) -> dict | None:
     """Call generate_structured() for task classification. Returns None on failure."""
@@ -644,6 +675,10 @@ def classify_task(state: FaustState, adapter=None) -> dict:
     Uses generate_structured() with a JSON schema for deterministic extraction
     when an adapter is available. Falls back to regex markers when the adapter
     is absent (unit tests / CI) or returns an empty result.
+
+    Approval detection runs FIRST: if the user sends an approval phrase and
+    requested_tests are already in state, we open the gate (test_approved=True)
+    and route to test_run without calling the LLM classifier.
     """
     query = _normalize_text(state.get("user_input", ""))
 
@@ -651,8 +686,17 @@ def classify_task(state: FaustState, adapter=None) -> dict:
     if not query:
         return {"task_type": "general"}
 
+    # --- Approval gate: detect explicit approval phrases FIRST ---
+    # If the user is approving a pending test proposal, open the gate immediately.
+    # This must run before the LLM classifier so the coder node sees test_approved=True.
+    if _is_approval(query) and state.get("requested_tests"):
+        return {
+            "task_type": "test_run",
+            "requested_role": "coder",
+            "test_approved": True,
+        }
 
-    # Approval gate: preserve test_run if gate is already armed.
+    # If already armed from a previous turn, preserve the test_run route.
     if state.get("test_approved") and state.get("requested_tests"):
         return {"task_type": "test_run"}
 
@@ -830,6 +874,15 @@ def build_prompt(state: FaustState) -> dict:
     if config:
         system_parts.append(config.system_prompt)
 
+    # Inject real model names so the assistant can answer 'what models are active?'
+    if config and hasattr(config, "models"):
+        models = config.models
+        system_parts.append(
+            f"Active model routing:\n"
+            f"  assistant (default): {models.default}\n"
+            f"  coder: {models.coder}\n"
+            f"  reasoner/planner: {models.planner}"
+        )
 
     if requested_role:
         system_parts.append(
@@ -1086,10 +1139,21 @@ def _write_test_report(
 
 
 def test_proposal_node(state: FaustState, adapter) -> dict:
-    """Generate a proposed scoped test. Does NOT run it. Requires human approval."""
+    """Generate a proposed scoped test. Does NOT run it. Requires human approval.
+
+    Extracts pytest targets from the user input and writes them into
+    requested_tests so they survive into the next (approval) turn.
+    Does NOT reset test_approved — that field stays False until the user
+    explicitly approves via classify_task's approval detection.
+    """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
+    # Extract targets NOW so they are preserved in state for the approval turn.
+    targets = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
+    # Merge with any targets already in state (e.g. from a prior draft turn).
+    existing = state.get("requested_tests") or []
+    merged = existing + [t for t in targets if t not in existing]
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -1101,7 +1165,7 @@ def test_proposal_node(state: FaustState, adapter) -> dict:
             "error": None,
             "intent": "test_draft",
             "active_agent": "test_proposer",
-            "requested_tests": [],
+            "requested_tests": merged,
             "test_report_path": None,
             "execution_notes": (
                 "Test proposal generated. "
@@ -1117,7 +1181,7 @@ def test_proposal_node(state: FaustState, adapter) -> dict:
             "error": str(exc),
             "intent": "test_draft",
             "active_agent": "test_proposer",
-            "requested_tests": [],
+            "requested_tests": merged,
             "test_report_path": None,
             "execution_notes": "Test proposal generation failed.",
         }
@@ -1472,9 +1536,9 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
     """Build and compile the LangGraph state graph with per-role model routing.
 
     Three OllamaAdapter instances are created from the models routing config:
-      - adapter_default  → config.models.default  (llama3.3:8b)  — assistant, memory
-      - adapter_coder    → config.models.coder     (qwen2.5-coder:14b) — coder, test_proposer
-      - adapter_reasoner → config.models.planner   (deepseek-r1:8b)    — reasoner
+      - adapter_default  -> config.models.default  (llama3:8b)         -- assistant, memory
+      - adapter_coder    -> config.models.coder     (qwen2.5-coder:14b) -- coder, test_proposer
+      - adapter_reasoner -> config.models.planner   (deepseek-r1:8b)   -- reasoner
 
     classify_task and _extract_requested_tests receive adapter_default so they
     can use generate_structured() for schema-constrained JSON extraction. The
@@ -1500,8 +1564,6 @@ def build_graph(config: AppConfig, adapter=None) -> CompiledStateGraph:
     store = make_memory_store(config)
 
     workflow.add_node("retrieve_memories", partial(retrieve_memories, store=store))
-    # classify_task receives adapter_default so structured JSON calls work in prod.
-    # The regex fallback fires automatically when adapter returns empty (unit tests/CI).
     workflow.add_node("classify_task", partial(classify_task, adapter=adapter_default))
     workflow.add_node("route_memory", route_memory)
     workflow.add_node("memory_answer", memory_answer_node)

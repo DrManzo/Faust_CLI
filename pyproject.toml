@@ -16,6 +16,27 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    # --- Test runner and plugins ---
+    "pytest>=7.0",
+    "pytest-anyio>=0.0.0",       # async test support (anyio backend)
+    "anyio>=4.0",                 # async primitives used in graph tests
+    "pytest-mock>=3.0",           # mocker fixture shorthand
+    "pytest-cov>=4.0",            # coverage reporting
+
+    # --- Type checking ---
+    "mypy>=1.0",
+    "types-PyYAML",               # stubs for pyyaml
+
+    # --- Linting and formatting ---
+    "ruff>=0.4",                  # fast linter + formatter (replaces flake8/black/isort)
+
+    # --- Dev utilities ---
+    "ipython>=8.0",               # better REPL for quick experimentation
+    "rich>=13.0",                 # already a runtime dep but listed for dev completeness
+]
+
 [project.scripts]
 faust = "faust.main:main"
 faust-tests = "faust.scripts.test_report:main"
@@ -32,3 +53,16 @@ minversion = "7.0"
 addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true

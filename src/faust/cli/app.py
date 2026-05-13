@@ -5,6 +5,7 @@ from __future__ import annotations
 import typer
 
 from faust.cli.commands.chat import chat as chat_cmd
+from faust.cli.commands.loop import loop as loop_cmd
 from faust.cli.commands.run import run as run_cmd
 
 app = typer.Typer(
@@ -53,3 +54,4 @@ def default(
 
 app.command("chat")(chat_cmd)
 app.command("run")(run_cmd)
+app.command("loop")(loop_cmd)

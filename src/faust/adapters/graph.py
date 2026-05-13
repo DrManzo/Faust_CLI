@@ -868,6 +868,7 @@ def build_prompt(state: FaustState) -> dict:
     recalled = state.get("recalled_memories", [])
     requested_role = state.get("requested_role")
     task_type = state.get("task_type")
+    test_approved = state.get("test_approved", False)
 
 
     system_parts: list[str] = []
@@ -902,19 +903,33 @@ def build_prompt(state: FaustState) -> dict:
                 if requested_tests
                 else "  (none extracted — check your target format)"
             )
-            system_parts.append(
-                "You are in test-run mode (Step 9 approval gate).\n"
-                "Scoped pytest targets extracted from this request:\n"
-                f"{targets_str}\n\n"
-                "Rules you must follow without exception:\n"
-                "1. Do NOT run any tests yet. Human approval is required first.\n"
-                "2. Do NOT invent alternate commands, flags, or output paths.\n"
-                "3. Do NOT modify or suggest changes to production code.\n"
-                "4. Acknowledge the exact targets listed above.\n"
-                "5. State clearly that approval is required before execution.\n"
-                "6. Ask the human to reply with explicit approval to proceed.\n"
-                "7. If no valid targets were extracted, say so and stop."
-            )
+            if test_approved:
+                # Gate is open: the graph runner will execute the tests.
+                # Tell the LLM to acknowledge the targets and confirm execution is proceeding.
+                system_parts.append(
+                    "Approval received. The graph runner is executing the following scoped pytest targets:\n"
+                    f"{targets_str}\n\n"
+                    "Your job:\n"
+                    "1. Acknowledge the targets listed above.\n"
+                    "2. State that execution is proceeding and results will appear in the debug block.\n"
+                    "3. Do NOT refuse to run. Do NOT say you cannot execute code.\n"
+                    "4. Do NOT add any extra commentary — keep it brief."
+                )
+            else:
+                # Gate is still closed: ask for approval.
+                system_parts.append(
+                    "You are in test-run mode (Step 9 approval gate).\n"
+                    "Scoped pytest targets extracted from this request:\n"
+                    f"{targets_str}\n\n"
+                    "Rules you must follow without exception:\n"
+                    "1. Do NOT run any tests yet. Human approval is required first.\n"
+                    "2. Do NOT invent alternate commands, flags, or output paths.\n"
+                    "3. Do NOT modify or suggest changes to production code.\n"
+                    "4. Acknowledge the exact targets listed above.\n"
+                    "5. State clearly that approval is required before execution.\n"
+                    "6. Ask the human to reply with explicit approval to proceed.\n"
+                    "7. If no valid targets were extracted, say so and stop."
+                )
         else:
             system_parts.append(
                 "You are the coder role. You MUST ground all code and test suggestions "
@@ -1248,7 +1263,13 @@ def reasoner_node(state: FaustState, adapter) -> dict:
 
 
 def coder_node(state: FaustState, adapter) -> dict:
-    """Code-focused implementation role — uses qwen2.5-coder:14b."""
+    """Code-focused implementation role — uses qwen2.5-coder:14b.
+
+    On a test_run approval turn the user message contains no pytest paths,
+    so fresh extraction returns []. We fall back to whatever requested_tests
+    is already in state (set by test_proposal_node on the prior turn) so
+    should_run_requested_tests can open the execution gate.
+    """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1256,7 +1277,16 @@ def coder_node(state: FaustState, adapter) -> dict:
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
             full_response += chunk
-        requested_tests = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
+
+        # Extract targets from the current message.
+        fresh_targets = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
+
+        # On a test_run approval turn the message has no paths — preserve state targets.
+        if state.get("task_type") == "test_run" and not fresh_targets:
+            requested_tests = state.get("requested_tests") or []
+        else:
+            requested_tests = fresh_targets
+
         return {
             "response": full_response,
             "error": None,
@@ -1271,7 +1301,8 @@ def coder_node(state: FaustState, adapter) -> dict:
             "error": str(exc),
             "intent": "coding",
             "active_agent": "coder",
-            "requested_tests": [],
+            # Preserve existing targets even on failure so the gate can still open.
+            "requested_tests": state.get("requested_tests") or [],
             "execution_notes": "Coder role failed during implementation response.",
         }
 

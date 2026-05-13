@@ -46,8 +46,9 @@ def default(
     obj["_default_user_id"] = user_id
     obj["_default_thread_id"] = thread_id
 
-    # Call chat_cmd directly with ctx so it receives its required first arg.
-    chat_cmd(ctx, user_id=user_id, thread_id=thread_id)
+    # Use ctx.invoke so that ctx.obj (config, graph) is already populated
+    # by main() before chat_cmd reads it.
+    ctx.invoke(chat_cmd, user_id=user_id, thread_id=thread_id)
 
 
 app.command("chat")(chat_cmd)

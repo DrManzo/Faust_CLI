@@ -644,6 +644,13 @@ _APPROVAL_PHRASES: tuple[str, ...] = (
     "this is approved",
     "faust this test is approved",
     "faust run",
+    "re-running the tests is approved",
+    "re-run is approved",
+    "rerun is approved",
+    "run it",
+    "run them",
+    "yes, run",
+    "please run",
 )
 
 
@@ -731,18 +738,33 @@ def classify_task(state: FaustState, adapter=None) -> dict:
         return {"task_type": "general"}
 
     # --- Approval gate: detect explicit approval phrases FIRST ---
-    # If the user is approving a pending test proposal, open the gate immediately.
-    # This must run before the LLM classifier so the coder node sees test_approved=True.
-    if _is_approval(query) and state.get("requested_tests"):
+    # Checks both state-stored targets AND regex-extracted targets from the
+    # current message history. This handles the case where assistant_node ran
+    # in between and the targets survived in the message history but not state.
+    existing_tests = state.get("requested_tests") or []
+
+    # Also scan recent message history for test paths as a fallback
+    # in case requested_tests was cleared by an intermediate node.
+    if not existing_tests:
+        messages = state.get("messages", [])
+        for msg in reversed(messages[-6:]):  # scan last 6 messages
+            content = getattr(msg, "content", "") or ""
+            found = _extract_targets_regex(content)
+            if found:
+                existing_tests = found
+                break
+
+    if _is_approval(query) and existing_tests:
         return {
             "task_type": "test_run",
             "requested_role": "coder",
             "test_approved": True,
+            "requested_tests": existing_tests,  # restore targets if cleared
         }
 
     # If already armed from a previous turn, preserve the test_run route.
-    if state.get("test_approved") and state.get("requested_tests"):
-        return {"task_type": "test_run"}
+    if state.get("test_approved") and existing_tests:
+        return {"task_type": "test_run", "requested_tests": existing_tests}
 
     # --- Extract-targets shortcut ---
     # If the message contains a tests/ path and the user says 'extract' or
@@ -1198,13 +1220,15 @@ def _write_test_report(
     returncode: int,
     stdout: str,
     stderr: str,
+    name: str | None = None,
 ) -> str:
     """Write a human-readable markdown report to faust/reports/ and return the path."""
     _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    report_path = _REPORTS_DIR / f"test-report-{timestamp}.md"
+    filename = f"{name}.md" if name else f"test-report-{timestamp}.md"
+    report_path = _REPORTS_DIR / filename
 
 
     status = "PASSED" if returncode == 0 else "FAILED"
@@ -1280,7 +1304,13 @@ def test_proposal_node(state: FaustState, adapter) -> dict:
 
 
 def assistant_node(state: FaustState, adapter) -> dict:
-    """General conversation role."""
+    """General conversation role.
+
+    IMPORTANT: does NOT write requested_tests. Preserving requested_tests
+    across assistant turns is critical so that the approval gate in
+    classify_task can still see the targets on the next turn even if the
+    user's approval phrase routes through assistant first.
+    """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1293,7 +1323,8 @@ def assistant_node(state: FaustState, adapter) -> dict:
             "error": None,
             "intent": state.get("intent") or "general_response",
             "active_agent": "assistant",
-            "requested_tests": [],
+            # Do NOT include requested_tests here — omitting the key preserves
+            # whatever value is already in state (LangGraph merges, not replaces).
             "execution_notes": "Assistant role completed response generation.",
         }
     except Exception as exc:
@@ -1302,14 +1333,17 @@ def assistant_node(state: FaustState, adapter) -> dict:
             "error": str(exc),
             "intent": state.get("intent") or "general_response",
             "active_agent": "assistant",
-            "requested_tests": [],
             "execution_notes": "Assistant role failed during response generation.",
         }
 
 
 
 def reasoner_node(state: FaustState, adapter) -> dict:
-    """Planning and decomposition role — uses deepseek-r1:8b."""
+    """Planning and decomposition role — uses deepseek-r1:8b.
+
+    IMPORTANT: does NOT write requested_tests for the same reason as
+    assistant_node — preserving existing targets across reasoner turns.
+    """
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
@@ -1317,13 +1351,12 @@ def reasoner_node(state: FaustState, adapter) -> dict:
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
             full_response += chunk
-        requested_tests = _extract_requested_tests(state.get("user_input", ""))
         return {
             "response": full_response,
             "error": None,
             "intent": "reasoning",
             "active_agent": "reasoner",
-            "requested_tests": requested_tests,
+            # Do NOT include requested_tests — preserve existing state value.
             "execution_notes": "Reasoner role completed planning/decomposition.",
         }
     except Exception as exc:
@@ -1332,7 +1365,6 @@ def reasoner_node(state: FaustState, adapter) -> dict:
             "error": str(exc),
             "intent": "reasoning",
             "active_agent": "reasoner",
-            "requested_tests": [],
             "execution_notes": "Reasoner role failed during planning/decomposition.",
         }
 
@@ -1410,6 +1442,7 @@ def _resolve_test_file(test_file: str) -> bool:
 def run_requested_tests(state: FaustState) -> dict:
     """Run scoped pytest targets. Safety rules enforced; full output to report file."""
     requested_tests = state.get("requested_tests", [])
+    report_name = state.get("test_report_name")  # optional custom name from user
     if not requested_tests:
         return {
             "execution_notes": "No scoped tests requested.",
@@ -1479,6 +1512,7 @@ def run_requested_tests(state: FaustState) -> dict:
             returncode=completed.returncode,
             stdout=stdout,
             stderr=stderr,
+            name=report_name,
         )
 
 
@@ -1510,6 +1544,7 @@ def run_requested_tests(state: FaustState) -> dict:
             returncode=-1,
             stdout=stdout.strip(),
             stderr=stderr.strip() + "\n[TIMEOUT after 60 seconds]",
+            name=report_name,
         )
 
 

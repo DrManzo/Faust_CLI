@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover
 
 
 from faust.core.models import AppConfig, FaustState, MemoryRecord, Message, Role
+from faust.core.plugins import get_registry
 
 
 _GRAPH_RESOURCES: list[ExitStack] = []
@@ -50,12 +51,20 @@ _CLASSIFY_SCHEMA: dict = {
     "properties": {
         "task_type": {
             "type": "string",
-            "enum": ["general", "coding", "reasoning", "test_draft", "test_run", "memory"],
+            "enum": [
+                "general",
+                "coding",
+                "reasoning",
+                "test_draft",
+                "test_run",
+                "memory",
+                "tool_call",
+            ],
             "description": "The primary task type for this user turn.",
         },
         "requested_role": {
             "type": ["string", "null"],
-            "enum": ["assistant", "coder", "reasoner", "test_proposer", None],
+            "enum": ["assistant", "coder", "reasoner", "test_proposer", "tool_call", None],
             "description": "The best agent role for this turn, or null to let task_type decide.",
         },
     },
@@ -591,12 +600,16 @@ Choose task_type from:
                   explicit pytest paths like tests/path/test_file.py::test_name.
                   KEY RULE: if the message contains a tests/ path, choose test_run.
 - "memory"      : save or recall a personal fact
+- "tool_call"   : invoke a registered plugin/tool (read_file, run_pytest, etc.)
+                  Use this when the user asks to read a file, call a tool, or
+                  explicitly names a registered plugin.
 
 Choose requested_role from:
 - "assistant"      : general help
 - "coder"          : code implementation or test execution
 - "reasoner"       : planning and design
 - "test_proposer"  : ONLY for test_draft (composing new tests from scratch)
+- "tool_call"      : ONLY for tool_call task type
 - null             : let task_type decide
 
 CRITICAL: test_proposer is ONLY for test_draft. If the message contains a
@@ -738,16 +751,11 @@ def classify_task(state: FaustState, adapter=None) -> dict:
         return {"task_type": "general"}
 
     # --- Approval gate: detect explicit approval phrases FIRST ---
-    # Checks both state-stored targets AND regex-extracted targets from the
-    # current message history. This handles the case where assistant_node ran
-    # in between and the targets survived in the message history but not state.
     existing_tests = state.get("requested_tests") or []
 
-    # Also scan recent message history for test paths as a fallback
-    # in case requested_tests was cleared by an intermediate node.
     if not existing_tests:
         messages = state.get("messages", [])
-        for msg in reversed(messages[-6:]):  # scan last 6 messages
+        for msg in reversed(messages[-6:]):
             content = getattr(msg, "content", "") or ""
             found = _extract_targets_regex(content)
             if found:
@@ -759,18 +767,13 @@ def classify_task(state: FaustState, adapter=None) -> dict:
             "task_type": "test_run",
             "requested_role": "coder",
             "test_approved": True,
-            "requested_tests": existing_tests,  # restore targets if cleared
+            "requested_tests": existing_tests,
         }
 
-    # If already armed from a previous turn, preserve the test_run route.
     if state.get("test_approved") and existing_tests:
         return {"task_type": "test_run", "requested_tests": existing_tests}
 
     # --- Extract-targets shortcut ---
-    # If the message contains a tests/ path and the user says 'extract' or
-    # 'do not run', route directly to test_run (coder) without calling the
-    # LLM classifier.  This prevents the classifier from misreading 'extract'
-    # as a test_draft / test_proposer intent.
     _has_test_path = bool(re.search(r"tests/[a-z0-9_./-]+", query, re.IGNORECASE))
     _extract_intent = any(
         phrase in query
@@ -826,6 +829,19 @@ def classify_task(state: FaustState, adapter=None) -> dict:
     if any(marker in query for marker in test_draft_markers):
         return {"task_type": "test_draft"}
 
+    # Phase 3: tool_call markers — no-LLM path for plugin dispatch.
+    # NOTE: 'run pytest' is intentionally NOT here; it stays in test_run_markers
+    # to preserve the existing scoped-test approval flow.
+    tool_call_markers = (
+        "read file",
+        "read the file",
+        "show me the file",
+        "call tool",
+        "use tool",
+        "invoke tool",
+    )
+    if any(marker in query for marker in tool_call_markers):
+        return {"task_type": "tool_call"}
 
     coding_markers = (
         "write code",
@@ -868,7 +884,6 @@ def route_memory(state: FaustState) -> dict:
     query = state.get("user_input", "")
     recalled = state.get("recalled_memories", [])
 
-    # Never divert an armed approval turn into the memory path.
     if state.get("test_approved") and state.get("requested_tests"):
         return {
             "memory_route": "role_router",
@@ -918,7 +933,7 @@ def determine_role(state: FaustState) -> dict:
     task_type = state.get("task_type")
 
 
-    if requested_role in {"assistant", "reasoner", "coder", "test_proposer"}:
+    if requested_role in {"assistant", "reasoner", "coder", "test_proposer", "tool_call"}:
         role = requested_role
     elif task_type == "test_draft":
         role = "test_proposer"
@@ -926,6 +941,8 @@ def determine_role(state: FaustState) -> dict:
         role = "coder"
     elif task_type == "reasoning":
         role = "reasoner"
+    elif task_type == "tool_call":
+        role = "tool_call"
     else:
         role = "assistant"
 
@@ -948,18 +965,93 @@ def route_role(state: FaustState) -> str:
         return "reasoner"
     if role == "test_proposer":
         return "test_proposer"
+    if role == "tool_call":
+        return "tool_call"
     return "assistant"
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: tool_call_node
+# ---------------------------------------------------------------------------
+
+def tool_call_node(state: FaustState) -> dict:
+    """Dispatch to a registered PluginRegistry tool.
+
+    Routing:
+      - No tool_name in state          -> neutral error message, no execution.
+      - requires_approval=True + gate  -> pass through to dispatch normally.
+      - requires_approval=True, no gate -> PermissionError caught; prompt user
+        for approval WITHOUT opening the gate (test_approved stays False).
+      - Any other exception             -> captured into state['error'].
+
+    The approval gate (test_approved) is reset to False after a successful
+    dispatch so a second approval cannot re-fire the same tool automatically.
+    """
+    tool_name = state.get("tool_name")
+    tool_inputs = state.get("tool_inputs") or {}
+    test_approved = state.get("test_approved", False)
+
+    if not tool_name:
+        return {
+            "response": "No tool was specified. Set tool_name in state before routing to tool_call.",
+            "error": None,
+            "active_agent": "tool_call",
+            "intent": "tool_call",
+            "tool_result": None,
+        }
+
+    registry = get_registry()
+
+    try:
+        result = registry.dispatch(
+            tool_name,
+            tool_inputs,
+            approval_override=test_approved,
+        )
+
+        # Format the raw result as a human-readable response string.
+        if isinstance(result, str):
+            response = result
+        elif isinstance(result, dict) and "content" in result:
+            response = result["content"]
+        else:
+            response = f"Tool '{tool_name}' executed successfully."
+
+        return {
+            "response": response,
+            "error": None,
+            "active_agent": "tool_call",
+            "intent": "tool_call",
+            "tool_result": result,
+            "test_approved": False,  # Reset gate after use
+        }
+
+    except PermissionError:
+        # Tool requires explicit approval but the gate is not open.
+        # DO NOT set test_approved=True here — user must approve explicitly.
+        return {
+            "response": (
+                f"Tool '{tool_name}' requires explicit approval before execution.\n"
+                "Reply with 'approved' or 'yes run' to proceed."
+            ),
+            "error": None,
+            "active_agent": "tool_call",
+            "intent": "tool_call",
+            "tool_result": None,
+        }
+
+    except Exception as exc:
+        return {
+            "response": "",
+            "error": f"Tool '{tool_name}' failed: {exc}",
+            "active_agent": "tool_call",
+            "intent": "tool_call",
+            "tool_result": None,
+        }
+
 
 def build_prompt(state: FaustState) -> dict:
-    """Ensure system prompt is first and inject recalled memories and role guidance.
-
-    For test_run turns, targets are pre-extracted from user_input via regex if
-    requested_tests in state is still empty (i.e. we are on turn 1 before
-    coder_node has written them back). This guarantees the system prompt always
-    shows the correct targets to the LLM regardless of turn order.
-    """
+    """Ensure system prompt is first and inject recalled memories and role guidance."""
     current = list(state.get("messages", []))
     config = state.get("config")
     recalled = state.get("recalled_memories", [])
@@ -972,8 +1064,6 @@ def build_prompt(state: FaustState) -> dict:
     if config:
         system_parts.append(config.system_prompt)
 
-    # Inject real model names so the assistant can answer 'what models are active?'
-    # All three roles are listed explicitly so the LLM can always report all of them.
     if config and hasattr(config, "models"):
         models = config.models
         system_parts.append(
@@ -995,10 +1085,6 @@ def build_prompt(state: FaustState) -> dict:
         )
     elif requested_role == "coder":
         if task_type == "test_run":
-            # --- Pre-extract targets from user_input if state is still empty ---
-            # On turn 1, coder_node hasn't run yet so requested_tests in state is [].
-            # We run a fast regex extraction here so the system prompt always has the
-            # real targets before the LLM sees the message.
             requested_tests = state.get("requested_tests") or []
             if not requested_tests:
                 user_input = state.get("user_input", "")
@@ -1010,8 +1096,6 @@ def build_prompt(state: FaustState) -> dict:
                 else "  (none extracted — check your target format)"
             )
             if test_approved:
-                # Gate is open: the graph runner will execute the tests.
-                # Tell the LLM to acknowledge the targets and confirm execution is proceeding.
                 system_parts.append(
                     "Approval received. The graph runner is executing the following scoped pytest targets:\n"
                     f"{targets_str}\n\n"
@@ -1022,8 +1106,6 @@ def build_prompt(state: FaustState) -> dict:
                     "4. Do NOT add any extra commentary — keep it brief."
                 )
             else:
-                # Gate is still closed: tell the LLM the targets were extracted and
-                # show them back to the user so they can confirm they are correct.
                 system_parts.append(
                     "You are in test-run mode (extraction complete, awaiting approval).\n"
                     "The following pytest targets were extracted verbatim from the user message:\n"
@@ -1198,17 +1280,10 @@ def memory_answer_node(state: FaustState) -> dict:
 
 
 def _extract_requested_tests(query: str, adapter=None) -> list[str]:
-    """Extract narrow pytest targets from plain-text requests.
-
-    Uses generate_structured() with a JSON schema when an adapter is available.
-    Falls back to regex extraction when adapter is absent or returns empty.
-    """
-    # --- Structured extraction (primary path) ---
+    """Extract narrow pytest targets from plain-text requests."""
     structured = _extract_tests_with_adapter(query, adapter)
     if structured is not None:
         return structured
-
-    # --- Regex fallback ---
     return _extract_targets_regex(query)
 
 
@@ -1254,23 +1329,11 @@ def _write_test_report(
 
 
 def test_proposal_node(state: FaustState, *, adapter) -> dict:
-    """Generate a proposed scoped test. Does NOT run it. Requires human approval.
-
-    Extracts pytest targets from the user input and writes them into
-    requested_tests so they survive into the next (approval) turn.
-    Does NOT reset test_approved — that field stays False until the user
-    explicitly approves via classify_task's approval detection.
-
-    The ``adapter`` parameter is keyword-only so the node can be called as
-    ``test_proposal_node(state, adapter=fake)`` in unit tests and bound via
-    ``functools.partial(test_proposal_node, adapter=x)`` in build_graph.
-    """
+    """Generate a proposed scoped test. Does NOT run it. Requires human approval."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
 
-    # Extract targets NOW so they are preserved in state for the approval turn.
     targets = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
-    # Merge with any targets already in state (e.g. from a prior draft turn).
     existing = state.get("requested_tests") or []
     merged = existing + [t for t in targets if t not in existing]
 
@@ -1308,20 +1371,9 @@ def test_proposal_node(state: FaustState, *, adapter) -> dict:
 
 
 def assistant_node(state: FaustState, *, adapter) -> dict:
-    """General conversation role.
-
-    IMPORTANT: does NOT write requested_tests. Preserving requested_tests
-    across assistant turns is critical so that the approval gate in
-    classify_task can still see the targets on the next turn even if the
-    user's approval phrase routes through assistant first.
-
-    The ``adapter`` parameter is keyword-only so the node can be called as
-    ``assistant_node(state, adapter=fake)`` in unit tests and bound via
-    ``functools.partial(assistant_node, adapter=x)`` in build_graph.
-    """
+    """General conversation role."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
-
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -1331,8 +1383,6 @@ def assistant_node(state: FaustState, *, adapter) -> dict:
             "error": None,
             "intent": state.get("intent") or "general_response",
             "active_agent": "assistant",
-            # Do NOT include requested_tests here — omitting the key preserves
-            # whatever value is already in state (LangGraph merges, not replaces).
             "execution_notes": "Assistant role completed response generation.",
         }
     except Exception as exc:
@@ -1347,18 +1397,9 @@ def assistant_node(state: FaustState, *, adapter) -> dict:
 
 
 def reasoner_node(state: FaustState, *, adapter) -> dict:
-    """Planning and decomposition role — uses deepseek-r1:8b.
-
-    IMPORTANT: does NOT write requested_tests for the same reason as
-    assistant_node — preserving existing targets across reasoner turns.
-
-    The ``adapter`` parameter is keyword-only so the node can be called as
-    ``reasoner_node(state, adapter=fake)`` in unit tests and bound via
-    ``functools.partial(reasoner_node, adapter=x)`` in build_graph.
-    """
+    """Planning and decomposition role — uses deepseek-r1:8b."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
-
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
@@ -1368,7 +1409,6 @@ def reasoner_node(state: FaustState, *, adapter) -> dict:
             "error": None,
             "intent": "reasoning",
             "active_agent": "reasoner",
-            # Do NOT include requested_tests — preserve existing state value.
             "execution_notes": "Reasoner role completed planning/decomposition.",
         }
     except Exception as exc:
@@ -1383,41 +1423,21 @@ def reasoner_node(state: FaustState, *, adapter) -> dict:
 
 
 def coder_node(state: FaustState, *, adapter) -> dict:
-    """Code-focused implementation role — uses qwen2.5-coder:14b.
-
-    On a test_run approval turn the user message contains no pytest paths,
-    so fresh extraction returns []. We fall back to whatever requested_tests
-    is already in state (set by test_proposal_node on the prior turn) so
-    should_run_requested_tests can open the execution gate.
-
-    Targets are always MERGED with existing state targets so that multi-turn
-    extract flows accumulate all paths before the approval gate fires.
-
-    The ``adapter`` parameter is keyword-only so the node can be called as
-    ``coder_node(state, adapter=fake)`` in unit tests and bound via
-    ``functools.partial(coder_node, adapter=x)`` in build_graph.
-    """
+    """Code-focused implementation role — uses qwen2.5-coder:14b."""
     message_dicts = [m.to_dict() for m in state["messages"]]
     full_response = ""
-
 
     try:
         for chunk in adapter.generate(message_dicts, stream=True):
             full_response += chunk
 
-        # Extract targets from the current message.
         fresh_targets = _extract_requested_tests(state.get("user_input", ""), adapter=adapter)
-
-        # Always merge fresh targets with whatever is already in state.
-        # This handles multi-turn extract flows where targets arrive one per turn.
         existing_targets = state.get("requested_tests") or []
         merged_targets = list(existing_targets)
         for t in fresh_targets:
             if t not in merged_targets:
                 merged_targets.append(t)
 
-        # On a test_run approval turn the message has no paths — fall back to
-        # state targets if merge produced nothing new.
         if state.get("task_type") == "test_run" and not merged_targets:
             merged_targets = existing_targets
 
@@ -1435,7 +1455,6 @@ def coder_node(state: FaustState, *, adapter) -> dict:
             "error": str(exc),
             "intent": "coding",
             "active_agent": "coder",
-            # Preserve existing targets even on failure so the gate can still open.
             "requested_tests": state.get("requested_tests") or [],
             "execution_notes": "Coder role failed during implementation response.",
         }
@@ -1468,7 +1487,7 @@ def _resolve_test_file(test_file: str) -> bool:
 def run_requested_tests(state: FaustState) -> dict:
     """Run scoped pytest targets. Safety rules enforced; full output to report file."""
     requested_tests = state.get("requested_tests", [])
-    report_name = state.get("test_report_name")  # optional custom name from user
+    report_name = state.get("test_report_name")
     if not requested_tests:
         return {
             "execution_notes": "No scoped tests requested.",
@@ -1717,34 +1736,22 @@ def build_graph(adapter_or_config, config_or_adapter=None) -> CompiledStateGraph
       build_graph(config)               -- normal CLI path, no injected adapter
       build_graph(adapter, config)      -- old / test path: adapter injected for all roles
       build_graph(config, adapter=None) -- same as first form
-
-    When a non-None adapter is passed (tests use FakeAdapter), that adapter is
-    used for ALL three role slots so tests never touch a live Ollama connection.
-    Live OllamaAdapter / OpenAICompatAdapter instances are only created when
-    adapter is None (i.e. the normal production CLI path).
     """
     from faust.adapters.ollama import OllamaAdapter
     from faust.adapters.openai_compat import OpenAICompatAdapter
 
-    # --- Argument normalisation (backward-compat) ---
-    # Old call:  build_graph(adapter, config)
-    # New call:  build_graph(config)
     if isinstance(adapter_or_config, AppConfig):
         config = adapter_or_config
-        injected_adapter = config_or_adapter  # may be None
+        injected_adapter = config_or_adapter
     else:
-        # adapter_or_config is actually the adapter (old call order)
         injected_adapter = adapter_or_config
         config = config_or_adapter
 
     def _make_adapter(model_name: str):
-        """Create a live adapter for the given model name."""
         if config.backend == "openai_compat":
             return OpenAICompatAdapter(config)
         return OllamaAdapter(config, model_override=model_name)
 
-    # If a test (or caller) injected an adapter, use it everywhere.
-    # Otherwise create three separate live adapters for the three roles.
     if injected_adapter is not None:
         adapter_default  = injected_adapter
         adapter_coder    = injected_adapter
@@ -1757,18 +1764,19 @@ def build_graph(adapter_or_config, config_or_adapter=None) -> CompiledStateGraph
     workflow = StateGraph(FaustState)
     store = make_memory_store(config)
 
-    workflow.add_node("retrieve_memories", partial(retrieve_memories, store=store))
-    workflow.add_node("classify_task", partial(classify_task, adapter=adapter_default))
-    workflow.add_node("route_memory", route_memory)
-    workflow.add_node("memory_answer", memory_answer_node)
-    workflow.add_node("role_router", determine_role)
-    workflow.add_node("build_prompt", build_prompt)
-    workflow.add_node("assistant",      partial(assistant_node,      adapter=adapter_default))
-    workflow.add_node("reasoner",       partial(reasoner_node,       adapter=adapter_reasoner))
-    workflow.add_node("coder",          partial(coder_node,          adapter=adapter_coder))
-    workflow.add_node("test_proposer",  partial(test_proposal_node,  adapter=adapter_coder))
-    workflow.add_node("run_requested_tests", run_requested_tests)
-    workflow.add_node("save_memory", partial(save_memory, store=store))
+    workflow.add_node("retrieve_memories",    partial(retrieve_memories,    store=store))
+    workflow.add_node("classify_task",        partial(classify_task,        adapter=adapter_default))
+    workflow.add_node("route_memory",         route_memory)
+    workflow.add_node("memory_answer",        memory_answer_node)
+    workflow.add_node("role_router",          determine_role)
+    workflow.add_node("build_prompt",         build_prompt)
+    workflow.add_node("assistant",            partial(assistant_node,       adapter=adapter_default))
+    workflow.add_node("reasoner",             partial(reasoner_node,        adapter=adapter_reasoner))
+    workflow.add_node("coder",                partial(coder_node,           adapter=adapter_coder))
+    workflow.add_node("test_proposer",        partial(test_proposal_node,   adapter=adapter_coder))
+    workflow.add_node("tool_call",            tool_call_node)  # Phase 3
+    workflow.add_node("run_requested_tests",  run_requested_tests)
+    workflow.add_node("save_memory",          partial(save_memory,          store=store))
 
     workflow.set_entry_point("retrieve_memories")
     workflow.add_edge("retrieve_memories", "classify_task")
@@ -1788,25 +1796,27 @@ def build_graph(adapter_or_config, config_or_adapter=None) -> CompiledStateGraph
         "build_prompt",
         route_role,
         {
-            "assistant": "assistant",
-            "reasoner": "reasoner",
-            "coder": "coder",
+            "assistant":     "assistant",
+            "reasoner":      "reasoner",
+            "coder":         "coder",
             "test_proposer": "test_proposer",
+            "tool_call":     "tool_call",  # Phase 3
         },
     )
-    workflow.add_edge("assistant", "save_memory")
-    workflow.add_edge("reasoner", "save_memory")
+    workflow.add_edge("assistant",           "save_memory")
+    workflow.add_edge("reasoner",            "save_memory")
+    workflow.add_edge("tool_call",           "save_memory")  # Phase 3
     workflow.add_conditional_edges(
         "coder",
         should_run_requested_tests,
         {
             "run_requested_tests": "run_requested_tests",
-            "save_memory": "save_memory",
+            "save_memory":         "save_memory",
         },
     )
     workflow.add_edge("run_requested_tests", "save_memory")
-    workflow.add_edge("test_proposer", END)
-    workflow.add_edge("save_memory", END)
+    workflow.add_edge("test_proposer",       END)
+    workflow.add_edge("save_memory",         END)
 
     checkpointer = make_checkpointer(config)
     return workflow.compile(checkpointer=checkpointer, store=store)

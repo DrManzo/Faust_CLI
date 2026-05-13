@@ -36,13 +36,15 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 # Valid pytest node-id forms accepted by _is_safe_target:
-#   tests/path/file.py
-#   tests/path/file.py::test_function_name
-#   tests/path/file.py::TestClass::test_method
-#   tests/path/             (directory sweep)
-# Rejects absolute paths, ../traversal, shell metacharacters.
+#   tests/                            (full directory sweep)
+#   tests/path/file.py                (file target)
+#   tests/path/file.py::test_func     (single test)
+#   tests/path/file.py::Class::method (class method)
+# Rejects: absolute paths, ../traversal, shell metacharacters.
+#
+# Note: [a-zA-Z0-9_/\-]* uses * (zero-or-more) so bare 'tests/' is valid.
 _SAFE_TARGET_RE = re.compile(
-    r"^tests/[a-zA-Z0-9_/\-]+(?:\.py(?:::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)?)?)?/?$"
+    r"^tests/[a-zA-Z0-9_/\-]*(?:\.py(?:::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)?)?)?/?$"
 )
 
 
@@ -50,10 +52,10 @@ def _is_safe_target(target: str) -> bool:
     """Return True only if *target* is a safe, scoped pytest path.
 
     Accepts:
-      - tests/path/file.py
-      - tests/path/file.py::test_function_name
-      - tests/path/file.py::TestClass::test_method
-      - tests/path/  (directory sweep)
+      - tests/                               (directory sweep)
+      - tests/path/file.py                   (file target)
+      - tests/path/file.py::test_func        (single function)
+      - tests/path/file.py::Class::method    (class method)
 
     Rejects:
       - Absolute paths
@@ -69,7 +71,6 @@ def _is_safe_target(target: str) -> bool:
     if re.search(r"[;&|`$<>\\!]", t):
         return False
     try:
-        # Resolve only the file portion (before any ::) to block traversal.
         file_part = t.split("::")[0]
         resolved = Path(file_part).resolve()
         cwd = Path.cwd().resolve()
@@ -83,10 +84,6 @@ def _is_safe_target(target: str) -> bool:
 # Node-id normalisation
 # ---------------------------------------------------------------------------
 
-# Extracts the first plausible pytest node-id from free-form model text.
-# Matches patterns like:
-#   tests/cli/test_foo.py::test_bar
-#   tests/cli/test_foo.py
 _NODE_ID_RE = re.compile(
     r"(tests/[a-zA-Z0-9_/\-]+\.py(?:::[a-zA-Z0-9_]+(?:::[a-zA-Z0-9_]+)?)?)"
 )
@@ -100,11 +97,6 @@ def _extract_node_ids(raw: list[str]) -> list[str]:
     - Otherwise try to extract an embedded node-id via regex scan.
     - If nothing valid is found, the entry is dropped and a warning is
       printed so the operator can see what was rejected and why.
-
-    This means that even when the model returns sloppy text like
-    ``test_exit_behavior::test_chat_exit_after_valid_turn`` the function
-    will reject it and report clearly rather than passing it to pytest
-    and producing a confusing 'not found' error.
     """
     result: list[str] = []
     for raw_target in raw:
@@ -112,7 +104,6 @@ def _extract_node_ids(raw: list[str]) -> list[str]:
         if _is_safe_target(t):
             result.append(t)
             continue
-        # Try to pull a valid node-id out of the text.
         m = _NODE_ID_RE.search(t)
         if m and _is_safe_target(m.group(1)):
             console.print(
@@ -134,7 +125,6 @@ def _extract_node_ids(raw: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _make_report_path() -> Path:
-    """Return a timestamped report path inside reports/."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     reports_dir = Path("reports")
     reports_dir.mkdir(exist_ok=True)
@@ -142,14 +132,9 @@ def _make_report_path() -> Path:
 
 
 def _run_tests(targets: list[str]) -> tuple[int, str, Path]:
-    """Run pytest against *targets* and return (returncode, output, path)."""
     report_path = _make_report_path()
     cmd = [sys.executable, "-m", "pytest"] + targets + ["-v", "--tb=short"]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
     combined = result.stdout + result.stderr
     report_path.write_text(combined, encoding="utf-8")
     return result.returncode, combined, report_path
@@ -170,7 +155,6 @@ def _display_proposal(proposal: dict) -> None:
     code_diff = proposal.get("code_diff", "")
     raw_targets = proposal.get("test_targets") or []
 
-    # Normalise targets: extract valid node-ids, report bad ones.
     safe_targets = _extract_node_ids(raw_targets)
 
     console.print()
@@ -201,11 +185,8 @@ def _display_proposal(proposal: dict) -> None:
             "Nothing will run on approval.[/yellow]"
         )
     else:
-        console.print(
-            "\n[dim]No test targets in this proposal.[/dim]"
-        )
+        console.print("\n[dim]No test targets in this proposal.[/dim]")
 
-    # Store the normalised targets back so the approval branch runs them.
     proposal["test_targets"] = safe_targets
 
     console.print()
@@ -227,7 +208,6 @@ def _ask_faust(
     thread_id: str,
     user_id: str,
 ) -> dict:
-    """Send *user_input* through the graph and return the updated state."""
     state["messages"].append(Message(role=Role.USER, content=user_input))
     state["user_input"] = user_input
     state["intent"] = None
@@ -262,20 +242,15 @@ def _ask_faust(
 def loop(
     ctx: typer.Context,
     thread_id: str = typer.Option(
-        "loop",
-        "--thread",
-        "-t",
+        "loop", "--thread", "-t",
         help="Thread ID (defaults to 'loop' for continuity across sessions).",
     ),
     user_id: str = typer.Option(
-        "default",
-        "--user",
-        "-u",
+        "default", "--user", "-u",
         help="Stable user ID for long-term memory.",
     ),
     task: str = typer.Option(
-        "",
-        "--task",
+        "", "--task",
         help="Optional initial task description to seed the loop.",
     ),
     debug: bool = typer.Option(
@@ -334,12 +309,8 @@ def loop(
         f"[dim]coder:[/dim] [cyan]{models.coder}[/cyan]  "
         f"[dim]reasoner:[/dim] [cyan]{models.planner}[/cyan]"
     )
-    console.print(
-        f"[dim]Thread:[/dim] {thread_id}    [dim]User:[/dim] {user_id}"
-    )
-    console.print(
-        "[dim]Nothing executes without your explicit approval.[/dim]\n"
-    )
+    console.print(f"[dim]Thread:[/dim] {thread_id}    [dim]User:[/dim] {user_id}")
+    console.print("[dim]Nothing executes without your explicit approval.[/dim]\n")
     console.print(
         "Type [bold yellow]exit[/bold yellow] or [bold yellow]quit[/bold yellow] "
         "to end the loop.\n"
@@ -355,14 +326,11 @@ def loop(
             response = state.get("response", "")
             if response:
                 console.print(f"\n[bold]Faust:[/bold] {response}\n")
-                state["messages"].append(
-                    Message(role=Role.ASSISTANT, content=response)
-                )
+                state["messages"].append(Message(role=Role.ASSISTANT, content=response))
             raw_proposal = state.get("test_proposal")
             if raw_proposal:
                 _pending_proposal = (
-                    raw_proposal
-                    if isinstance(raw_proposal, dict)
+                    raw_proposal if isinstance(raw_proposal, dict)
                     else {
                         "description": str(raw_proposal),
                         "test_targets": state.get("requested_tests") or [],
@@ -388,11 +356,8 @@ def loop(
         if not stripped:
             continue
 
-        # --- Approval branch ---------------------------------------------------
         if _pending_proposal and _APPROVE_RE.match(stripped):
-            targets = _extract_node_ids(
-                _pending_proposal.get("test_targets") or []
-            )
+            targets = _extract_node_ids(_pending_proposal.get("test_targets") or [])
             if not targets:
                 console.print(
                     "[yellow]No safe test targets in this proposal — nothing to run.[/yellow]"
@@ -400,9 +365,7 @@ def loop(
                 _pending_proposal = None
                 continue
 
-            console.print(
-                f"[green]Running approved targets:[/green] {', '.join(targets)}"
-            )
+            console.print(f"[green]Running approved targets:[/green] {', '.join(targets)}")
             returncode, output, report_path = _run_tests(targets)
 
             status = "[green]PASSED[/green]" if returncode == 0 else "[red]FAILED[/red]"
@@ -419,7 +382,6 @@ def loop(
             _pending_proposal = None
             continue
 
-        # --- Normal turn: forward to graph ------------------------------------
         try:
             state = _ask_faust(graph, state, stripped, thread_id, user_id)
         except Exception as exc:
@@ -433,17 +395,14 @@ def loop(
             console.print(f"[red]Error:[/red] {error}")
         elif response:
             console.print(f"\n[bold]Faust:[/bold] {response}\n")
-            state["messages"].append(
-                Message(role=Role.ASSISTANT, content=response)
-            )
+            state["messages"].append(Message(role=Role.ASSISTANT, content=response))
         else:
             console.print("[dim]No response received.[/dim]")
 
         raw_proposal = state.get("test_proposal")
         if raw_proposal:
             _pending_proposal = (
-                raw_proposal
-                if isinstance(raw_proposal, dict)
+                raw_proposal if isinstance(raw_proposal, dict)
                 else {
                     "description": str(raw_proposal),
                     "test_targets": state.get("requested_tests") or [],

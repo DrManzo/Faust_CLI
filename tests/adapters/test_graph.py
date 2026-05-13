@@ -295,6 +295,32 @@ def test_classify_task_test_draft_takes_priority_over_coding():
     assert result["task_type"] == "test_draft"
 
 
+# ========== Step 9: classify_task test_run ==========
+
+
+def test_classify_task_detects_test_run_task():
+    """classify_task should classify explicit pytest execution requests as test_run."""
+    for phrase in [
+        "run pytest tests/adapters/test_graph.py",
+        "run scoped pytest tests/core/test_session.py::test_foo",
+        "execute pytest tests/cli/test_commands.py",
+    ]:
+        state = make_state(user_input=phrase)
+        result = classify_task(state)
+        assert result["task_type"] == "test_run", f"Expected test_run for: {phrase!r}"
+
+
+def test_classify_task_preserves_test_run_on_approval_turn():
+    """classify_task should keep task_type=test_run when the approval gate is armed."""
+    # Simulates the human replying 'yes' while test_approved+requested_tests are set.
+    state = make_state(user_input="yes")
+    state["test_approved"] = True
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = classify_task(state)
+    assert result["task_type"] == "test_run"
+
+
 # ========== determine_role ==========
 
 
@@ -354,6 +380,16 @@ def test_determine_role_selects_test_proposer_for_test_draft_task():
 
     assert result["requested_role"] == "test_proposer"
     assert "test_proposer" in result["execution_notes"]
+
+
+def test_determine_role_selects_coder_for_test_run_task():
+    """determine_role should map test_run tasks to coder role."""
+    state = make_state(user_input="run pytest tests/adapters/test_graph.py")
+    state["task_type"] = "test_run"
+
+    result = determine_role(state)
+
+    assert result["requested_role"] == "coder"
 
 
 # ========== route_role ==========
@@ -448,13 +484,12 @@ def test_proposal_node_does_not_run_pytest(monkeypatch):
     assert "invoked" not in called, "graph_proposal_node must not invoke subprocess.run"
 
 
-# ========== Step 9: approval gate ==========
+# ========== Step 9: approval gate (should_run_requested_tests) ==========
 
 
-def test_should_run_requested_tests_routes_coder_with_approved_tests():
-    """Coder flows with test_approved=True and requested tests should fire run_requested_tests."""
-    state = make_state(user_input="write code")
-    state["active_agent"] = "coder"
+def test_should_run_requested_tests_fires_when_approved_and_targets_exist():
+    """Gate fires when test_approved=True and requested_tests is non-empty."""
+    state = make_state(user_input="yes, run the tests")
     state["test_approved"] = True
     state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
 
@@ -464,9 +499,8 @@ def test_should_run_requested_tests_routes_coder_with_approved_tests():
 
 
 def test_should_run_requested_tests_blocks_without_approval():
-    """Coder flows without test_approved should skip test execution even with targets."""
+    """Gate blocks when test_approved=False even if targets are present."""
     state = make_state(user_input="write code")
-    state["active_agent"] = "coder"
     state["test_approved"] = False
     state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
 
@@ -475,28 +509,43 @@ def test_should_run_requested_tests_blocks_without_approval():
     assert result == "save_memory"
 
 
-def test_should_run_requested_tests_skips_when_not_coder():
-    """Non-coder flows should skip scoped test execution."""
-    state = make_state(user_input="plan this")
-    state["active_agent"] = "reasoner"
-    state["test_approved"] = True
-    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
-
-    result = should_run_requested_tests(state)
-
-    assert result == "save_memory"
-
-
-def test_should_run_requested_tests_skips_when_no_requested_tests():
-    """Coder flows without requested tests should skip scoped test execution."""
-    state = make_state(user_input="write code")
-    state["active_agent"] = "coder"
+def test_should_run_requested_tests_skips_when_no_targets():
+    """Gate skips test execution when test_approved=True but no targets are set."""
+    state = make_state(user_input="yes")
     state["test_approved"] = True
     state["requested_tests"] = []
 
     result = should_run_requested_tests(state)
 
     assert result == "save_memory"
+
+
+def test_should_run_requested_tests_is_agent_independent():
+    """Gate should fire regardless of which agent last ran (approval-turn fix)."""
+    # active_agent=assistant is what an approval turn produces after the fix.
+    state = make_state(user_input="yes")
+    state["active_agent"] = "assistant"
+    state["test_approved"] = True
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = should_run_requested_tests(state)
+
+    assert result == "run_requested_tests"
+
+
+# ========== Step 9: route_memory approval bypass ==========
+
+
+def test_route_memory_bypasses_memory_path_when_approval_gate_armed():
+    """route_memory should not redirect to save_memory/recall when approval is armed."""
+    state = make_state(user_input="yes, run the tests")
+    state["test_approved"] = True
+    state["requested_tests"] = ["tests/adapters/test_graph.py::test_build_graph_runs_end_to_end"]
+
+    result = route_memory(state)
+
+    assert result["memory_route"] == "role_router"
+    assert "Approval gate armed" in result["execution_notes"]
 
 
 # ========== run_requested_tests ==========
@@ -1183,7 +1232,7 @@ def test_save_memory_accepts_implicit_name_statement():
     memory = result["recalled_memories"][0]
     assert memory.slot == "profile.name"
     assert memory.text == "The user's name is Javier."
-    assert result["response"] == "Okay — I'll remember that your name is Javier."
+    assert result["response"] == "Okay \u2014 I'll remember that your name is Javier."
 
 
 def test_save_memory_accepts_implicit_birthday_statement():
@@ -1202,7 +1251,7 @@ def test_save_memory_accepts_implicit_birthday_statement():
     assert memory.text == "The user's birthdate is April 4th 1994."
     assert (
         result["response"]
-        == "Okay — I'll remember that your birthdate is April 4th 1994."
+        == "Okay \u2014 I'll remember that your birthdate is April 4th 1994."
     )
 
 
@@ -1220,7 +1269,7 @@ def test_save_memory_accepts_implicit_favorite_editor_statement():
     memory = result["recalled_memories"][0]
     assert memory.slot == "preference.favorite_editor"
     assert memory.text == "The user's favorite editor is Vim."
-    assert result["response"] == "Okay — I'll remember that your favorite editor is Vim."
+    assert result["response"] == "Okay \u2014 I'll remember that your favorite editor is Vim."
 
 
 def test_save_memory_strips_actually_from_editor_correction():
@@ -1237,7 +1286,7 @@ def test_save_memory_strips_actually_from_editor_correction():
     memory = result["recalled_memories"][0]
     assert memory.slot == "preference.favorite_editor"
     assert memory.text == "The user's favorite editor is Vim."
-    assert result["response"] == "Okay — I'll remember that your favorite editor is Vim."
+    assert result["response"] == "Okay \u2014 I'll remember that your favorite editor is Vim."
 
 
 def test_route_memory_returns_memory_write_for_implicit_name_statement():
@@ -1517,7 +1566,7 @@ def test_save_memory_accepts_implicit_favorite_shell_statement():
     memory = result["recalled_memories"][0]
     assert memory.slot == "preference.favorite_shell"
     assert memory.text == "The user's favorite shell is zsh."
-    assert result["response"] == "Okay — I'll remember that your favorite shell is zsh."
+    assert result["response"] == "Okay \u2014 I'll remember that your favorite shell is zsh."
 
 
 def test_route_memory_returns_memory_write_for_implicit_shell_statement():

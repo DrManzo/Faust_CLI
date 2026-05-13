@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from langgraph.store.memory import InMemoryStore
 
@@ -866,7 +867,7 @@ def test_build_graph_runs_end_to_end():
         state,
         config={
             "configurable": {
-                "thread_id": "test-thread",
+                "thread_id": str(uuid4()),
                 "user_id": "test-user",
             }
         },
@@ -1058,7 +1059,7 @@ def test_graph_preserves_artifacts_list():
         state,
         config={
             "configurable": {
-                "thread_id": "test-thread",
+                "thread_id": str(uuid4()),
                 "user_id": "test-user",
             }
         },
@@ -1438,7 +1439,7 @@ def test_graph_routes_coding_query_to_coder_node():
 
     result = graph.invoke(
         state,
-        config={"configurable": {"thread_id": "coding-test", "user_id": "test-user"}},
+        config={"configurable": {"thread_id": str(uuid4()), "user_id": "test-user"}},
     )
 
     assert result["active_agent"] == "coder"
@@ -1482,7 +1483,7 @@ def test_graph_routes_general_query_to_assistant_node():
 
     result = graph.invoke(
         state,
-        config={"configurable": {"thread_id": "general-test", "user_id": "test-user"}},
+        config={"configurable": {"thread_id": str(uuid4()), "user_id": "test-user"}},
     )
 
     assert result["active_agent"] == "assistant"

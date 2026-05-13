@@ -4,6 +4,103 @@ All notable changes to Faust are documented here, step by step.
 
 ---
 
+## [Step 11] — 2026-05-13 — Agent Tests, Edit-and-Propose Cycle, Plugin Registry
+
+Step 11 delivered in three strictly ordered phases. Phase 2 did not start until Phase 1 tests were passing. Phase 3 did not start until Phase 2 was exercised. All safety boundaries from Step 9 and Step 10 remain in force.
+
+### Phase 1 — Agent-level unit tests
+
+**`test(agents): add isolated unit tests for all five agent nodes`**
+
+Filled `tests/agents/` with five new test modules — one per agent node. Each test stubs the LLM adapter, asserts on state fields written by the node (not just the response string), and is fully self-contained with no shared state between tests.
+
+| File | Node under test | Tests |
+|---|---|---|
+| `test_assistant_node.py` | `assistant_node` | 4 |
+| `test_reasoner_node.py` | `reasoner_node` | 4 |
+| `test_coder_node.py` | `coder_node` | 4 |
+| `test_test_proposer_node.py` | `test_proposal_node` | 4 |
+| `test_memory_writer_node.py` | `save_memory` | 4 |
+
+Key assertions per node:
+- `assistant` — `response` content, `active_agent == "assistant"`, `execution_notes`, error capture
+- `reasoner` — `response`, `active_agent == "reasoner"`, `intent == "reasoning"`, error capture
+- `coder` — `response`, `active_agent == "coder"`, `intent == "coding"`, error capture
+- `test_proposer` — `test_proposal == response`, `test_approved is False`, `subprocess.run` never called
+- `memory_writer` — slot written, `category == "preference"`, slot overwrite semantics, `active_agent == "memory_write"`
+
+Validation: `pytest tests/agents/ -v --tb=short` → **20 passed**
+
+### Phase 2 — `faust loop` edit-and-propose cycle
+
+**`feat(loop): add unified-diff proposal, write-on-approval, and scoped test runner`**
+
+Extended `faust loop` so it can propose a real code change, render a unified diff in the proposal panel, write the file only after explicit approval, and then run the scoped test targets.
+
+- `src/faust/loop_editor.py` — pure dataclass `EditProposal` + `build_unified_diff` + `write_approved_change`
+  - `write_approved_change` rejects any target path outside `src/` — hard boundary, no exceptions
+  - `build_unified_diff` uses stdlib `difflib.unified_diff` — no external dependency
+- `src/faust/cli/commands/loop.py` — `_handle_edit_proposal`
+  - Renders the unified diff in the proposal panel before anything is written
+  - Gates on `_APPROVE_RE` (unchanged vocabulary: `approve` / `yes` / `confirm`)
+  - On approval: calls `write_approved_change`, then `_run_tests`, then prints file written + pass/fail
+  - On rejection: discards the proposal, nothing written, nothing run
+  - If tests fail after the write: prints the failure clearly, does **not** auto-revert — human decides
+
+**Safety invariants — unchanged:**
+- No writes outside `src/`
+- No test targets outside `tests/`
+- No execution without explicit approval
+- No shell injection acceptance
+- Approval vocabulary unchanged
+
+Validation:
+- Manual smoke test: `faust loop --task "add a docstring to one function"` ✓
+- `pytest tests/cli/test_exit_behavior.py -v --tb=short` → **27 passed**
+- `pytest tests/cli/test_loop_editor.py -v --tb=short` → **21 passed**
+
+### Phase 3 — Plugin / tool registry
+
+**`feat(core): introduce PluginRegistry and built-in read_file / run_pytest tools`**
+
+Introduced a `PluginRegistry` in `src/faust/core/plugins.py` so Faust can invoke defined tools as a first-class graph operation.
+
+- `PluginEntry` dataclass — `name`, `fn`, `input_schema`, `requires_approval`, `description`
+- `PluginRegistry` — dict-backed store with `register`, `unregister`, `get`, `list_names`, `dispatch`
+  - `dispatch` raises `PermissionError` for tools with `requires_approval=True` unless `approval_override=True`
+  - `dispatch` raises `KeyError` for unknown tool names — no silent fallback
+- `_builtin_read_file` — reads a file under `src/`. Traversal outside `src/` raises `ValueError`.
+- `_builtin_run_pytest` — runs scoped pytest targets through the existing `_safe_test_target` gate. `requires_approval=True`.
+- `_safe_test_target` — validates that a target is a safe `tests/` path. Rejects traversal, shell tokens, and empty strings.
+- `get_registry()` — module-level singleton pre-populated with `read_file` and `run_pytest`.
+
+**`feat(graph): add tool_call node and route tool_call intent through classify_task / route_role`**
+
+- `tool_call_node` added to `adapters/graph.py` — dispatches to `get_registry()`, resets `test_approved` after use, routes `PermissionError` to the approval prompt without opening the gate
+- `classify_task` extended to classify `tool_call` intent
+- `route_role` extended to dispatch `tool_call` to `tool_call_node`
+
+**No speculative tools built.** Only `read_file` and `run_pytest` are implemented in this step.
+
+Validation:
+- `pytest tests/core/ -v --tb=short` → **21 plugin tests + all prior core tests passed**
+- `pytest tests/adapters/test_graph.py -v --tb=short` → **82 passed**
+- `pytest tests/adapters/test_tool_call_node.py -v --tb=short` → **13 passed**
+- Manual smoke test: `faust loop --task "read src/faust/cli/constants.py and summarize it"` ✓
+
+### Safety guarantees — unchanged from Step 9/10
+- No execution without explicit operator approval
+- No pytest targets outside `tests/`
+- No shell metacharacter acceptance
+- No writes outside `src/` (loop editor) or `reports/` (test runner)
+- No silent production code writes outside the approved workflow
+
+### Baseline after Step 11
+- **261 passing tests** across all suites — < 0.60s, fully in-memory
+- Breakdown: 82 graph, 13 tool_call, 20 agent isolation, 48 CLI/loop/editor, 21 plugin registry, remaining core
+
+---
+
 ## [Step 10] — 2026-05-13 — CLI Polish, Controlled Loop, and Structural Cleanup
 
 Step 10 delivered in three ordered phases: CLI reliability first, supervised self-coding loop second, structural refactor third. No phase started until the previous one was validated.
@@ -60,10 +157,10 @@ Step 10 delivered in three ordered phases: CLI reliability first, supervised sel
 **`cleanup: resolve three pre-Step-11 housekeeping gaps`**
 - `tests/test results/` renamed to `tests/test_results/` (space removed from directory name).
 - `tests/agents/.gitkeep` and `tests/core/.gitkeep` added so both directories are git-tracked.
-- `tests/cli/test_renderer.py` added — four tests covering all public functions in `renderer.py` (`print_banner`, `print_response`, `print_error`, `print_session_info`).
+- `tests/cli/test_renderer.py` added — four tests covering all public functions in `renderer.py`.
 
 **`fix(tests): align stale test stubs to current AppConfig shape`**
-- `FakeOllamaConfig` in `test_ollama.py` updated to expose `.models` `SimpleNamespace` matching the multi-model `ModelConfig` shape that `OllamaAdapter.__init__` now reads.
+- `FakeOllamaConfig` in `test_ollama.py` updated to expose `.models` `SimpleNamespace` matching the multi-model `ModelConfig` shape.
 - `test_app_config_defaults` updated from `llama3:8b` to `llama3.3:8b` to match the current `AppConfig` default.
 
 ### Safety guarantees — unchanged

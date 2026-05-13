@@ -8,9 +8,9 @@ Faust runs entirely offline. No API keys. No cloud dependency. You own the model
 
 ## What Faust actually does
 
-Most “AI CLIs” are a prompt piped to an API. Faust is different.
+Most "AI CLIs" are a prompt piped to an API. Faust is different.
 
-Every turn runs through a compiled **LangGraph state machine** that classifies your intent, routes to the right agent, manages short- and long-term memory, and can propose and execute scoped pytest runs — all without touching the internet.
+Every turn runs through a compiled **LangGraph state machine** that classifies your intent, routes to the right agent, manages short- and long-term memory, proposes and writes scoped code changes, and can invoke typed tools — all without touching the internet.
 
 ```text
 you: plan out the architecture for a plugin system
@@ -31,9 +31,17 @@ Faust: [coder]
 ```
 
 ```text
+you: read src/faust/cli/constants.py and summarize it
+
+Faust: [tool_call → read_file]
+  constants.py defines CLI_VERSION, approval regex, exit tokens,
+  and the _resolve_option helper. No approval required.
+```
+
+```text
 you: remember that my preferred shell is zsh
 
-Faust: Got it — I’ll remember that your preferred shell is zsh.
+Faust: Got it — I'll remember that your preferred shell is zsh.
 
 you: what shell do I use?
 
@@ -49,11 +57,14 @@ Faust: [memory — deterministic, no LLM call]
 Input
   └─► classify_task
         └─► determine_role
-              └─► route_role ──► assistant ──► build_prompt ──► LLM stream
-                            ├──► reasoner  ──► build_prompt ──► LLM stream
-                            ├──► coder     ──► build_prompt ──► LLM stream ──► [scoped pytest]
+              └─► route_role ──► assistant    ──► build_prompt ──► LLM stream
+                            ├──► reasoner     ──► build_prompt ──► LLM stream
+                            ├──► coder        ──► build_prompt ──► LLM stream ──► [scoped pytest]
                             ├──► test_proposer ──► proposal (no execution)
-                            └──► memory_router ──► save / deterministic_recall / LLM
+                            ├──► memory_router ──► save / deterministic_recall / LLM
+                            └──► tool_call    ──► PluginRegistry.dispatch
+                                                    ├──► read_file   (no approval)
+                                                    └──► run_pytest  (approval required)
 ```
 
 The graph is compiled once at startup and reused for all turns. State is scoped per thread and user. Every node writes to a shared `FaustState` dict — no hidden side channels.
@@ -68,11 +79,70 @@ Faust classifies every input and routes it to the best agent path.
 | Role | Triggered by | Does |
 |---|---|---|
 | `assistant` | General Q&A | Conversational response |
-| `reasoner` | Planning, decomposition, “think through” | Step-by-step analysis |
-| `coder` | Code, refactor, “write code for” | Code generation + optional scoped test run |
-| `test_proposer` | “draft a test”, “propose a test for” | Proposes test code — never executes without approval |
-| `memory_writer` | “remember that…”, implicit self-facts | Writes durable user fact to memory store |
+| `reasoner` | Planning, decomposition, "think through" | Step-by-step analysis |
+| `coder` | Code, refactor, "write code for" | Code generation + optional scoped test run |
+| `test_proposer` | "draft a test", "propose a test for" | Proposes test code — never executes without approval |
+| `memory_writer` | "remember that…", implicit self-facts | Writes durable user fact to memory store |
 | `memory_answer` | Supported slot recall questions | Answers directly from memory — zero LLM latency |
+| `tool_call` | "read …", "run pytest …" | Dispatches to a registered plugin via PluginRegistry |
+
+### Plugin / tool registry
+
+Faust now supports first-class tool invocations through a typed `PluginRegistry`.
+
+```python
+from faust.core.plugins import get_registry
+
+registry = get_registry()
+result = registry.dispatch("read_file", {"path": "src/faust/cli/constants.py"}, approval_override=False)
+```
+
+Built-in tools in Step 11:
+
+| Tool | Requires approval | Description |
+|---|---|---|
+| `read_file` | No | Reads a file under `src/`. Path traversal outside `src/` is rejected. |
+| `run_pytest` | **Yes** | Runs scoped pytest targets. Must pass through the same approval gate as test execution. |
+
+Tools that require approval are blocked by `PermissionError` in `dispatch` unless `approval_override=True` — which is only set after the operator explicitly approves. No speculative tools are built.
+
+### `faust loop` — edit-and-propose cycle
+
+Faust can propose real code changes, show you a unified diff, and write the file **only after you approve**.
+
+```bash
+faust loop --task "add a docstring to one function"
+```
+
+```text
+Faust: [loop — edit proposal]
+  File: src/faust/cli/commands/loop.py
+  --- a/src/faust/cli/commands/loop.py
+  +++ b/src/faust/cli/commands/loop.py
+  @@ -42,6 +42,11 @@
+   def _run_tests(targets):
+  +    """Execute scoped pytest targets and return the CompletedProcess result."""
+
+  Test targets: tests/cli/test_loop_editor.py
+
+  Type approve / yes / confirm to write and run, or anything else to discard.
+
+you: approve
+
+Faust: File written: src/faust/cli/commands/loop.py
+  Running: tests/cli/test_loop_editor.py
+  Tests: PASSED
+  Report: reports/loop_20260513_214502.txt
+```
+
+On rejection: nothing is written, nothing is run. If tests fail after the write, the failure is printed clearly — Faust never auto-reverts. The human decides.
+
+**Safety boundaries (unchanged from Step 9/10):**
+- No writes outside `src/`
+- No test targets outside `tests/`
+- No execution without explicit approval
+- No shell injection acceptance (`;`, `&&`, `|`, `` ` ``, `$()`)
+- Approval vocabulary: `approve` / `yes` / `confirm`
 
 ### Deterministic memory recall
 For supported user facts, Faust answers **without calling the model at all**. No hallucination risk on your own data.
@@ -87,39 +157,14 @@ Supported memory slots:
 | `preference.favorite_editor` | `my favorite editor is Vim` | `What editor do I use?` → `Your favorite editor is Vim.` |
 | `preference.favorite_shell` | `my favorite shell is zsh` | `Which shell do I prefer?` → `Your preferred shell is zsh.` |
 
-Slot corrections with “actually” overwrite the previous value cleanly.
-
-### Supervised self-coding loop
-
-Faust can work on its own codebase through a controlled loop with a hard approval gate before anything runs.
-
-```bash
-faust loop --task "Fix the piped stdin exit bug"
-```
-
-```text
-Faust: [loop]
-  Proposal: Catch typer.Abort on exhausted stdin in chat.py
-  Diff: ...
-  Test targets: tests/cli/test_exit_behavior.py::test_chat_piped_stdin_exhaustion_exits_cleanly
-
-  Type approve / yes / confirm to run, or anything else to skip.
-
-you: approve
-
-Faust: Running approved targets: tests/cli/test_exit_behavior.py::...
-  Tests: PASSED
-  Report written to: reports/loop_20260513_202518.txt
-```
-
-Nothing executes until you explicitly approve. No targets outside `tests/` are accepted.
+Slot corrections with "actually" overwrite the previous value cleanly.
 
 ### Safe test proposal and execution
 The coder and test_proposer roles separate **proposal** from **execution**:
 
 - `test_proposer` drafts test code and returns it for human review — `subprocess.run` is never called.
 - `coder` can execute scoped pytest targets when `test_approved=True` in state.
-- All targets must live under `tests/`. Shell injection tokens (`;`, `&&`, `|`, `` ` ``) are rejected at the gate.
+- All targets must live under `tests/`. Shell injection tokens are rejected at the gate.
 - `_write_test_report` writes only to `reports/` — never to `src/`.
 
 ### Three memory layers
@@ -207,12 +252,15 @@ faust --help                      # Full command reference
 ## Test suite
 
 ```bash
-pytest tests/ -v --tb=short      # full suite (186 tests)
-pytest tests/adapters/test_graph.py -v   # graph layer only (90 tests)
-pytest tests/cli/ -v             # CLI and loop tests
+pytest tests/ -v --tb=short                          # full suite (261 tests)
+pytest tests/agents/ -v                              # agent node isolation (20 tests)
+pytest tests/adapters/test_graph.py -v               # graph layer (82 tests)
+pytest tests/cli/ -v                                 # CLI, loop, and editor tests (48 tests)
+pytest tests/core/ -v                                # core + plugin registry tests
+pytest tests/adapters/test_tool_call_node.py -v      # tool_call node (13 tests)
 ```
 
-Current automated baseline: **186 passing tests in < 0.65s**, all in-memory.
+Current automated baseline: **261 passing tests in < 0.60s**, all in-memory.
 
 ---
 
@@ -233,18 +281,19 @@ reports/               ← Scoped pytest reports written by coder and loop nodes
 
 ```text
 src/faust/
-├── adapters/     ← Ollama + OpenAI adapters, graph.py
+├── adapters/     ← Ollama + OpenAI adapters, graph.py (incl. tool_call node)
 ├── agents/       ← Agent node definitions
 ├── cli/          ← Typer CLI commands (chat, loop, run, config)
 │   ├── commands/   ← chat.py, loop.py, run.py
 │   └── constants.py ← Shared exit tokens, approval regex, option resolver
-└── core/         ← Models, config, memory, testing helpers
+└── core/         ← Models, config, memory, testing helpers, plugins.py
+    └── plugins.py  ← PluginRegistry, PluginEntry, read_file, run_pytest
 
 tests/
-├── adapters/     ← Graph + Ollama adapter tests (92 tests)
-├── agents/       ← Agent-level tests (Step 11+)
-├── cli/          ← CLI, loop, renderer tests (36 tests)
-├── core/         ← Config, models, session, memory, testing (58 tests)
+├── adapters/     ← Graph + Ollama + tool_call node tests
+├── agents/       ← Agent-level isolation tests (Step 11 — 20 tests)
+├── cli/          ← CLI, loop, editor, renderer tests (48 tests)
+├── core/         ← Config, models, session, memory, testing, plugins
 └── test_results/ ← Test run artifacts
 ```
 
@@ -262,6 +311,9 @@ make test
 # Run only the graph suite
 pytest tests/adapters/test_graph.py -v
 
+# Run agent isolation tests
+pytest tests/agents/ -v
+
 # Run the loop in supervised mode
 faust loop --task "<describe what you want Faust to work on>"
 ```
@@ -272,15 +324,16 @@ faust loop --task "<describe what you want Faust to work on>"
 
 - **Graph over glue.** Every routing decision is an explicit node in a compiled state machine, not an if-else chain in a callback.
 - **Determinism over probability** for anything you already know. Supported memory recall never uses the LLM.
-- **Proposal before execution.** Tests are drafted and shown to you before any subprocess fires.
+- **Proposal before execution.** Code changes are shown as diffs and tests are drafted for review before any subprocess fires.
 - **Narrow and durable over broad and fuzzy.** Memory slots are explicit contracts, not embeddings or fuzzy search.
-- **Approval gates, not trust.** The loop never runs code without explicit human confirmation. Every production change goes through you.
+- **Approval gates, not trust.** The loop never writes or runs code without explicit human confirmation. Every production change goes through you.
+- **Typed tools, not magic.** The PluginRegistry enforces input schemas and approval requirements — no tool executes as a side effect.
 - **Local always.** Ollama-first. No outbound calls during inference.
 
 ---
 
 ## Status
 
-Faust is an actively evolving local assistant project. The current foundation is intentionally stable — graph wiring, memory system, role routing, and test safety boundaries are all locked behind tests before new capabilities are added.
+Faust is an actively evolving local assistant project. The current foundation is intentionally stable — graph wiring, memory system, role routing, plugin registry, and test safety boundaries are all locked behind tests before new capabilities are added.
 
-**Step 10 complete.** CLI exit behavior is clean across all modes (interactive, piped, single-shot). The supervised self-coding loop (`faust loop`) is live with a hard approval gate. All 186 tests pass. The repo is clean and ready for Step 11.
+**Step 11 complete.** Agent-level unit tests, the `faust loop` edit-and-propose cycle (unified diff → approval → write → test run), and the `PluginRegistry` with `tool_call` graph node are all live. **261 tests pass, 0 failures.** All Step 9 and Step 10 safety boundaries remain in force.

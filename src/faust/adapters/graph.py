@@ -537,15 +537,28 @@ def classify_task(state: FaustState) -> dict:
         return {"task_type": "general"}
 
 
+    # Step 9: test_run must be checked FIRST — before test_draft markers —
+    # so that explicit pytest execution requests ("run scoped pytest ...",
+    # "execute pytest ...") are never swallowed by the draft path.
+    test_run_markers = (
+        "run scoped pytest",
+        "execute scoped pytest",
+        "run pytest",
+        "execute pytest",
+    )
+    if any(marker in query for marker in test_run_markers):
+        return {"task_type": "test_run"}
+
     # Step 9: test_draft must be checked before generic coding markers so that
     # test-draft prompts do not fall through into the coder execution path.
     # Markers are ordered most-specific first.
+    # NOTE: "scoped pytest" and bare "pytest" are intentionally NOT listed here —
+    # they are execution signals handled above by test_run_markers.
     test_draft_markers = (
         "draft a test",
         "draft test",
         "propose a test",
         "propose a scoped",
-        "scoped pytest",
         "write a test for",
         "write tests for",
         "suggest a test",
@@ -646,7 +659,9 @@ def determine_role(state: FaustState) -> dict:
         role = requested_role
     elif task_type == "test_draft":
         role = "test_proposer"
-    elif task_type == "coding":
+    elif task_type in {"coding", "test_run"}:
+        # test_run routes to coder so the approval gate and
+        # run_requested_tests path can fire when test_approved is True.
         role = "coder"
     elif task_type == "reasoning":
         role = "reasoner"
